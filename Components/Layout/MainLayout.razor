@@ -1,0 +1,32 @@
+@inherits LayoutComponentBase
+@inject AuthStateService AuthState
+
+<div class="page" style="background-color: #121214; min-height: 100vh;">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <article class="content px-4" style="background-color: #121214; color: #e1e1e6; min-height: 100vh;">
+            @Body
+        </article>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    오류가 발생했습니다.
+    <a href="." class="reload">새로고침</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    // 브라우저 새로고침(F5) 시 암호화된 저장소에서 로그인 상태를 자동으로 복원
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await AuthState.RestoreSessionAsync();
+            StateHasChanged();
+        }
+    }
+}

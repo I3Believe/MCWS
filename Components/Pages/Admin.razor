@@ -1,0 +1,239 @@
+@page "/admin"
+@implements IDisposable
+@inject AppDbContext Db
+@inject AuthService Auth
+@inject AuthStateService AuthState
+
+<PageTitle>계정 및 감사 로그 - MCWS</PageTitle>
+
+@if (!AuthState.IsLoggedIn)
+{
+    <div class="alert alert-warning bg-dark border-warning text-warning">
+        로그인이 필요합니다. <a href="/login" class="text-warning fw-bold">로그인 페이지로 이동</a>
+    </div>
+}
+else if (AuthState.CurrentUser!.Role == UserRole.Operator)
+{
+    <div class="alert alert-danger bg-dark border-danger text-danger">
+        이 페이지는 Master 또는 Admin 권한이 있어야 접근할 수 있습니다.
+    </div>
+}
+else
+{
+    <div class="container-fluid py-3">
+        <h3 class="fw-bold mb-4" style="color: #00d26a;">계정 관리 및 감사 로그 (Audit Log)</h3>
+
+        @if (!string.IsNullOrEmpty(_message))
+        {
+            <div class="alert @(_isError ? "alert-danger border-danger text-danger" : "alert-info border-info text-info") bg-dark py-2">@_message</div>
+        }
+
+        <div class="row g-4 mb-4">
+            <!-- 1. 가입 승인 대기 목록 -->
+            <div class="col-md-5">
+                <div class="card border-secondary shadow-sm h-100" style="background-color: #1a1a1e; color: #e1e1e6;">
+                    <div class="card-header bg-warning text-dark fw-bold">
+                        가입 승인 대기 목록 (@_pendingUsers.Count)
+                    </div>
+                    <div class="card-body">
+                        @if (_pendingUsers.Count == 0)
+                        {
+                            <p class="text-secondary mb-0">현재 승인 대기 중인 계정이 없습니다.</p>
+                        }
+                        else
+                        {
+                            <table class="table table-dark table-sm align-middle">
+                                <thead>
+                                    <tr>
+                                        <th>아이디</th>
+                                        <th>요청 시각</th>
+                                        <th class="text-end">처리</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (var u in _pendingUsers)
+                                    {
+                                        <tr>
+                                            <td class="fw-bold">@u.Username</td>
+                                            <td class="small text-secondary">@u.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-success me-1" @onclick="() => HandleApproval(u.Id, true)">승인</button>
+                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => HandleApproval(u.Id, false)">거절(삭제)</button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div>
+                </div>
+            </div>
+
+            <!-- 2. 승인된 전체 회원 관리 -->
+            <div class="col-md-7">
+                <div class="card border-secondary shadow-sm h-100" style="background-color: #1a1a1e; color: #e1e1e6;">
+                    <div class="card-header bg-dark border-secondary text-white fw-bold">
+                        등록된 운영진 목록 (@_approvedUsers.Count)
+                    </div>
+                    <div class="card-body">
+                        <table class="table table-dark table-sm align-middle">
+                            <thead>
+                                <tr>
+                                    <th>아이디</th>
+                                    <th>등급</th>
+                                    <th>승인자</th>
+                                    <th class="text-end">Master 전용 관리</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var u in _approvedUsers)
+                                {
+                                    <tr>
+                                        <td class="fw-bold">@u.Username</td>
+                                        <td>
+                                            <span class="badge @(u.Role == UserRole.Master ? "bg-danger" : u.Role == UserRole.Admin ? "bg-primary" : "bg-secondary")">
+                                                @u.Role
+                                            </span>
+                                        </td>
+                                        <td class="small text-secondary">@(u.ApprovedBy ?? "-")</td>
+                                        <td class="text-end">
+                                            @if (AuthState.IsMaster && u.Role != UserRole.Master)
+                                            {
+                                                @if (u.Role == UserRole.Operator)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-info me-1"
+                                                            @onclick="() => HandleRoleChange(u.Id, UserRole.Admin)">
+                                                        Admin 승격
+                                                    </button>
+                                                }
+                                                else if (u.Role == UserRole.Admin)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-secondary me-1"
+                                                            @onclick="() => HandleRoleChange(u.Id, UserRole.Operator)">
+                                                        Operator 강등
+                                                    </button>
+                                                }
+
+                                                <button class="btn btn-sm btn-danger"
+                                                        @onclick="() => HandleDeleteUser(u.Id)">
+                                                    계정 삭제
+                                                </button>
+                                            }
+                                            else
+                                            {
+                                                <span class="text-secondary small">-</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3. 서버 행위 감사 로그 (AuditLogs) -->
+        <div class="card border-secondary shadow-sm" style="background-color: #1a1a1e; color: #e1e1e6;">
+            <div class="card-header bg-dark border-secondary text-white d-flex justify-content-between align-items-center">
+                <span class="fw-bold" style="color: #00d26a;">서버 행위 감사 로그 (최근 100건)</span>
+                <button class="btn btn-sm btn-outline-light" @onclick="LoadDataAsync">새로고침</button>
+            </div>
+            <div class="card-body p-0">
+                <div style="max-height: 360px; overflow-y: auto;">
+                    <table class="table table-dark table-striped table-hover table-sm mb-0">
+                        <thead class="sticky-top">
+                            <tr>
+                                <th class="ps-3">시각</th>
+                                <th>수행자 (Username)</th>
+                                <th>행위 (Action)</th>
+                                <th>대상 및 상세 (Target)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var log in _auditLogs)
+                            {
+                                <tr>
+                                    <td class="ps-3 small text-secondary">@log.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                                    <td class="fw-bold">@log.Username</td>
+                                    <td><span class="badge bg-secondary">@log.Action</span></td>
+                                    <td>@log.Target</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private List<User> _pendingUsers = new();
+    private List<User> _approvedUsers = new();
+    private List<AuditLog> _auditLogs = new();
+    private string _message = "";
+    private bool _isError = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthState.OnChange += HandleAuthStateChanged;
+        await LoadDataAsync();
+    }
+
+    private void HandleAuthStateChanged()
+    {
+        InvokeAsync(async () =>
+        {
+            await LoadDataAsync();
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadDataAsync()
+    {
+        var allUsers = await Db.Users.OrderBy(u => u.Id).ToListAsync();
+        _pendingUsers = allUsers.Where(u => !u.IsApproved).ToList();
+        _approvedUsers = allUsers.Where(u => u.IsApproved).ToList();
+
+        _auditLogs = await Db.AuditLogs
+            .OrderByDescending(l => l.Timestamp)
+            .Take(100)
+            .ToListAsync();
+    }
+
+    private async Task HandleApproval(int targetUserId, bool approve)
+    {
+        if (AuthState.CurrentUser == null) return;
+
+        var res = await Auth.ProcessApprovalAsync(targetUserId, approve, AuthState.CurrentUser);
+        _isError = !res.Success;
+        _message = res.Message;
+        await LoadDataAsync();
+    }
+
+    private async Task HandleRoleChange(int targetUserId, UserRole newRole)
+    {
+        if (AuthState.CurrentUser == null) return;
+
+        var res = await Auth.ChangeUserRoleAsync(targetUserId, newRole, AuthState.CurrentUser);
+        _isError = !res.Success;
+        _message = res.Message;
+        await LoadDataAsync();
+    }
+
+    private async Task HandleDeleteUser(int targetUserId)
+    {
+        if (AuthState.CurrentUser == null) return;
+
+        var res = await Auth.DeleteApprovedUserAsync(targetUserId, AuthState.CurrentUser);
+        _isError = !res.Success;
+        _message = res.Message;
+        await LoadDataAsync();
+    }
+
+    public void Dispose()
+    {
+        AuthState.OnChange -= HandleAuthStateChanged;
+    }
+}

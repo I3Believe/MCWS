@@ -1,0 +1,690 @@
+@page "/"
+@implements IDisposable
+@inject AppDbContext Db
+@inject ServerInstanceManager InstanceManager
+@inject AuthStateService AuthState
+@inject IJSRuntime JS
+
+<PageTitle>대시보드 - MCWS</PageTitle>
+
+@if (!AuthState.IsLoggedIn)
+{
+    <div class="container py-5 text-center">
+        <div class="card border-secondary shadow-lg mx-auto" style="max-width: 520px; background-color: #1a1a1e; color: #e1e1e6;">
+            <div class="card-body py-5">
+                <h3 class="fw-bold mb-3" style="color: #00d26a;">MCWS 서버 매니저</h3>
+                <p class="text-secondary mb-4">
+                    마인크래프트 멀티 인스턴스 관리 및 실시간 웹 콘솔을 사용하려면 로그인해 주세요.
+                </p>
+                <a href="/login" class="btn btn-success fw-bold px-4">로그인 / 가입 신청 페이지로 이동</a>
+            </div>
+        </div>
+    </div>
+}
+else
+{
+    <div class="container-fluid py-3">
+        <!-- 상단 호스트 리소스 상태 바 -->
+        <div class="d-flex justify-content-between align-items-center border border-secondary rounded p-3 mb-4 shadow-sm" style="background-color: #1a1a1e;">
+            <div>
+                <h4 class="mb-0 fw-bold" style="color: #00d26a;">마인크래프트 멀티 서버 대시보드</h4>
+                <small class="text-secondary">최대 3개 슬롯 (Port 25565 ~ 25567) 독립 실행 지원</small>
+            </div>
+            <div class="d-flex gap-4 text-end">
+                <div>
+                    <div class="small text-secondary">호스트 여유 메모리 (Available RAM)</div>
+                    <div class="fs-5 fw-bold text-info">@InstanceManager.GetHostAvailableRamGb() GB</div>
+                </div>
+                <div>
+                    <div class="small text-secondary">가동 중인 슬롯</div>
+                    <div class="fs-5 fw-bold text-success">
+                        @_instances.Count(i => InstanceManager.GetStatus(i.Id) != ServerStatus.Offline) / 3
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (!string.IsNullOrEmpty(_statusMessage))
+        {
+            <div class="alert @(_isError ? "alert-danger border-danger text-danger" : "alert-info border-info text-info") bg-dark alert-dismissible fade show py-2">
+                @_statusMessage
+                <button type="button" class="btn-close btn-close-white py-2" @onclick="() => _statusMessage = string.Empty"></button>
+            </div>
+        }
+
+        <!-- 3개 슬롯 카드 영역 -->
+        <div class="row g-3 mb-4">
+            @for (int slot = 1; slot <= 3; slot++)
+            {
+                int currentSlot = slot;
+                int slotPort = 25564 + currentSlot;
+                var instance = _instances.FirstOrDefault(i => i.SlotNumber == currentSlot);
+
+                <div class="col-md-4">
+                    @if (instance == null)
+                    {
+                        <div class="card h-100 border-secondary shadow-sm" style="background-color: #1a1a1e; color: #e1e1e6;">
+                            <div class="card-body d-flex flex-column justify-content-center align-items-center py-4 text-center">
+                                <h5 class="text-secondary fw-bold">SLOT #@currentSlot (Port: @slotPort)</h5>
+                                <p class="small text-secondary mb-3">비어 있는 슬롯입니다.</p>
+                                <button class="btn btn-outline-success fw-bold" @onclick="() => OpenCreateModal(currentSlot, slotPort)">
+                                    + 새 서버 인스턴스 생성
+                                </button>
+                            </div>
+                        </div>
+                    }
+                    else
+                    {
+                        var liveStatus = InstanceManager.GetStatus(instance.Id);
+                        bool isSelected = _selectedInstance?.Id == instance.Id;
+
+                        <div class="card h-100 shadow-sm @(isSelected ? "border-success border-2" : "border-secondary")" style="background-color: #1a1a1e; color: #e1e1e6;">
+                            <div class="card-header d-flex justify-content-between align-items-center bg-dark border-secondary text-white">
+                                <span class="fw-bold">SLOT #@instance.SlotNumber : @instance.Name</span>
+                                <span class="badge @GetStatusBadgeClass(liveStatus)">@liveStatus</span>
+                            </div>
+                            <div class="card-body small">
+                                <div class="mb-1"><strong class="text-secondary">포트:</strong> @instance.Port</div>
+                                <div class="mb-1"><strong class="text-secondary">할당 RAM:</strong> @instance.AllocatedRamGb GB (-Xms/-Xmx)</div>
+                                <div class="mb-1"><strong class="text-secondary">구동 파일:</strong> <code>@instance.JarFileName</code> (Java @instance.JavaVersion)</div>
+                                <div class="mb-3"><strong class="text-secondary">생성자:</strong> @instance.CreatedBy</div>
+
+                                <div class="d-flex flex-wrap gap-1">
+                                    @if (liveStatus == ServerStatus.Offline)
+                                    {
+                                        <button class="btn btn-sm btn-success fw-bold" @onclick="() => StartServer(instance)">서버 시작</button>
+                                    }
+                                    else if (liveStatus == ServerStatus.Running || liveStatus == ServerStatus.Starting)
+                                    {
+                                        <button class="btn btn-sm btn-warning fw-bold" @onclick="() => StopServer(instance.Id)">안전 종료 (stop)</button>
+                                    }
+                                    else
+                                    {
+                                        <button class="btn btn-sm btn-secondary" disabled>종료 대기 중...</button>
+                                    }
+
+                                    <button class="btn btn-sm btn-outline-light" @onclick="() => SelectInstance(instance)">
+                                        콘솔 / 파일 편집
+                                    </button>
+
+                                    <button class="btn btn-sm btn-outline-danger ms-auto"
+                                            disabled="@(liveStatus != ServerStatus.Offline)"
+                                            @onclick="() => DeleteInstance(instance.Id)">
+                                        삭제
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
+        <!-- 새 서버 인스턴스 생성 영역 -->
+        @if (_showCreateModal)
+        {
+            <div class="card border-success shadow mb-4" style="background-color: #1a1a1e; color: #e1e1e6;">
+                <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+                    <span class="fw-bold">SLOT #@_newSlotNumber (Port: @_newPort) 서버 인스턴스 생성</span>
+                    <button class="btn btn-sm btn-dark" @onclick="() => _showCreateModal = false">닫기</button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold small text-secondary">서버 이름</label>
+                            <input class="form-control bg-black text-white border-secondary" @bind="_newServerName" placeholder="예: 야생 서버 시즌1" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label fw-bold small text-secondary">실행기 (.jar 템플릿)</label>
+                            <select class="form-select bg-black text-white border-secondary" @bind="_selectedTemplateId">
+                                <option value="0">-- .jar 파일 선택 --</option>
+                                @foreach (var t in _templates)
+                                {
+                                    <option value="@t.Id">@t.FileName (Java @t.RecommendedJavaVersion)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label fw-bold small text-secondary">RAM 할당 (GB)</label>
+                            <select class="form-select bg-black text-white border-secondary" @bind="_newRamGb">
+                                <option value="2">2 GB</option>
+                                <option value="4">4 GB</option>
+                                <option value="8">8 GB</option>
+                                <option value="12">12 GB</option>
+                                <option value="16">16 GB</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label fw-bold small text-secondary">초기 월드 맵 (.zip 선택사항)</label>
+                            <select class="form-select bg-black text-white border-secondary" @bind="_selectedMapId">
+                                <option value="0">-- 새 월드 자동 생성 --</option>
+                                @foreach (var m in _worldMaps)
+                                {
+                                    <option value="@m.Id">@m.FileName</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mt-3 text-end">
+                        <button class="btn btn-success fw-bold" @onclick="CreateInstanceAsync">인스턴스 생성 완료</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- 선택된 서버 상세 패널: 실시간 콘솔 + eula.txt + server.properties + 월드 백업 -->
+        @if (_selectedInstance != null)
+        {
+            <div class="card border-secondary shadow-sm" style="background-color: #1a1a1e; color: #e1e1e6;">
+                <div class="card-header bg-dark border-secondary text-white d-flex justify-content-between align-items-center">
+                    <div>
+                        <span class="fw-bold me-3" style="color: #00d26a;">[SLOT #@_selectedInstance.SlotNumber] @_selectedInstance.Name</span>
+                        <div class="btn-group btn-group-sm">
+                            <button class="btn @(_activeTab == "console" ? "btn-success fw-bold" : "btn-outline-light")"
+                                    @onclick='() => SwitchTab("console")'>실시간 콘솔</button>
+                            <button class="btn @(_activeTab == "eula" ? "btn-success fw-bold" : "btn-outline-light")"
+                                    @onclick='() => SwitchTab("eula")'>eula.txt 설정</button>
+                            <button class="btn @(_activeTab == "props" ? "btn-success fw-bold" : "btn-outline-light")"
+                                    @onclick='() => SwitchTab("props")'>server.properties 설정</button>
+                            <button class="btn @(_activeTab == "world" ? "btn-success fw-bold" : "btn-outline-light")"
+                                    @onclick='() => SwitchTab("world")'>월드 맵 교체 / 백업</button>
+                            <button class="btn @(_activeTab == "addons" ? "btn-success fw-bold" : "btn-outline-light")"
+                                    @onclick='() => SwitchTab("addons")'>플러그인 / 모드</button>
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => _selectedInstance = null">패널 닫기</button>
+                </div>
+
+                <div class="card-body">
+                    @if (_activeTab == "console")
+                    {
+                        <div id="mcws-console-box"
+                             class="bg-black text-light font-monospace p-3 rounded border border-secondary mb-2"
+                             style="height: 340px; overflow-y: auto; font-size: 0.85rem;">
+                            @{
+                                var logs = InstanceManager.GetLogs(_selectedInstance.Id);
+                                if (logs.Count == 0)
+                                {
+                                    <div class="text-secondary">서버가 시작되면 실시간 표준 출력(stdout/stderr) 로그가 여기에 표시됩니다.</div>
+                                }
+                                else
+                                {
+                                    foreach (var line in logs)
+                                    {
+                                        <div class="@(line.IsError ? "text-danger" : "text-light")">
+                                            <span class="text-secondary">[@line.Timestamp.ToLocalTime().ToString("HH:mm:ss")]</span> @line.Text
+                                        </div>
+                                    }
+                                }
+                            }
+                        </div>
+
+                        <div class="input-group">
+                            <span class="input-group-text font-monospace bg-dark text-success border-secondary">&gt;</span>
+                            <input class="form-control font-monospace bg-black text-white border-secondary"
+                                   placeholder="마인크래프트 서버 명령어 입력 (예: list, op 유저명, say 공지사항, save-all)"
+                                   @bind="_commandInput"
+                                   @bind:event="oninput"
+                                   @onkeydown="HandleCommandKeyDown" />
+                            <button class="btn btn-success fw-bold" @onclick="SendConsoleCommandAsync">명령어 전송</button>
+                        </div>
+                    }
+                    else if (_activeTab == "eula")
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="small text-secondary">파일 경로: @_selectedInstance.WorkingDirectory/eula.txt</span>
+                            <div>
+                                <button class="btn btn-sm btn-success fw-bold me-1" @onclick="AgreeEulaAsync">
+                                    eula=true 원클릭 동의 및 저장
+                                </button>
+                                <button class="btn btn-sm btn-primary" @onclick="SaveConfigFileAsync">수동 저장</button>
+                            </div>
+                        </div>
+                        <textarea class="form-control font-monospace bg-black text-white border-secondary" rows="8" @bind="_configEditorText"></textarea>
+                    }
+                    else if (_activeTab == "props")
+                    {
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <span class="small text-secondary">파일 경로: @_selectedInstance.WorkingDirectory/server.properties</span>
+                            <button class="btn btn-sm btn-success fw-bold" @onclick="SaveConfigFileAsync">server.properties 저장</button>
+                        </div>
+                        <textarea class="form-control font-monospace bg-black text-white border-secondary" rows="12" @bind="_configEditorText"></textarea>
+                    }
+                    else if (_activeTab == "world")
+                    {
+                        <div class="row g-4">
+                            <div class="col-md-4">
+                                <h6 class="fw-bold text-success">1. 현재 월드 백업 (.zip)</h6>
+                                <p class="small text-secondary">실행 중이면 자동으로 save-all flush 후 압축합니다.</p>
+                                <div class="input-group">
+                                    <input class="form-control bg-black text-white border-secondary" @bind="_exportZipName" placeholder="예: season1_backup.zip" />
+                                    <button class="btn btn-success fw-bold" @onclick="ExportWorldAsync">백업 생성</button>
+                                </div>
+                            </div>
+                            <div class="col-md-5">
+                                <h6 class="fw-bold text-warning">2. 보관함 월드 맵(.zip) 덮어쓰기</h6>
+                                <p class="small text-secondary">서버가 Offline 상태일 때 기존 월드를 지우고 적용합니다.</p>
+                                <div class="input-group">
+                                    <select class="form-select bg-black text-white border-secondary" @bind="_applyMapId">
+                                        <option value="0">-- 적용할 월드 맵 선택 --</option>
+                                        @foreach (var m in _worldMaps)
+                                        {
+                                            <option value="@m.Id">@m.FileName</option>
+                                        }
+                                    </select>
+                                    <button class="btn btn-warning fw-bold" @onclick="ApplyWorldAsync">월드 적용</button>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <h6 class="fw-bold text-danger">3. 월드 완전 초기화</h6>
+                                <p class="small text-secondary">기존 월드(오버월드/네더/엔더)를 삭제하여 새 지형을 생성합니다.</p>
+                                <button class="btn btn-outline-danger w-100 fw-bold" @onclick="ResetWorldAsync">
+                                    월드 초기화 (새 월드)
+                                </button>
+                            </div>
+                        </div>
+                    }
+                    else if (_activeTab == "addons")
+                    {
+                        var liveStatus = InstanceManager.GetStatus(_selectedInstance.Id);
+                        var allowedTypes = AllowedAddonTypes(_selectedInstance.LoaderType);
+
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <span class="small text-secondary">
+                                이 슬롯의 로더:
+                                <span class="badge @(_selectedInstance.LoaderType == ServerLoaderType.ModOnly ? "bg-primary" : _selectedInstance.LoaderType == ServerLoaderType.Hybrid ? "bg-danger" : "bg-warning text-dark")">
+                                    @_selectedInstance.LoaderType
+                                </span>
+                            </span>
+                            @if (liveStatus != ServerStatus.Offline)
+                            {
+                                <span class="small text-warning">서버 실행 중에는 변경해도 재시작해야 적용됩니다.</span>
+                            }
+                        </div>
+
+                        <div class="row g-4">
+                            @foreach (var addonType in allowedTypes)
+                            {
+                                var currentType = addonType;
+                                var isPlugin = currentType == AddonType.Plugin;
+                                var installed = currentType == AddonType.Plugin ? _installedPlugins : _installedMods;
+                                var storageList = _addons.Where(a => a.Type == currentType).ToList();
+
+                                <div class="col-md-@(allowedTypes.Length == 1 ? "12" : "6")">
+                                    <h6 class="fw-bold @(isPlugin ? "text-warning" : "text-primary")">
+                                        @(isPlugin ? "플러그인 (plugins/)" : "모드 (mods/)")
+                                    </h6>
+                                    <ul class="list-group list-group-flush border border-secondary rounded">
+                                        @if (storageList.Count == 0)
+                                        {
+                                            <li class="list-group-item bg-dark text-secondary small text-center py-3">
+                                                자료실에 업로드된 @(isPlugin ? "플러그인" : "모드")이(가) 없습니다.
+                                            </li>
+                                        }
+                                        @foreach (var a in storageList)
+                                        {
+                                            bool isInstalled = installed.Contains(a.FileName);
+                                            <li class="list-group-item bg-dark text-white d-flex justify-content-between align-items-center py-2 border-secondary">
+                                                <span>
+                                                    <code>@a.FileName</code>
+                                                    @if (isInstalled)
+                                                    {
+                                                        <span class="badge bg-success ms-2">장착됨</span>
+                                                    }
+                                                </span>
+                                                @if (isInstalled)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => ToggleAddonAsync(a, false)">제거</button>
+                                                }
+                                                else
+                                                {
+                                                    <button class="btn btn-sm btn-outline-success" @onclick="() => ToggleAddonAsync(a, true)">장착</button>
+                                                }
+                                            </li>
+                                        }
+                                    </ul>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<ServerInstance> _instances = new();
+    private List<ServerTemplate> _templates = new();
+    private List<WorldMap> _worldMaps = new();
+
+    private ServerInstance? _selectedInstance;
+    private string _activeTab = "console";
+    private string _commandInput = "";
+    private string _configEditorText = "";
+
+    private bool _showCreateModal = false;
+    private int _newSlotNumber = 1;
+    private int _newPort = 25565;
+    private string _newServerName = "";
+    private int _selectedTemplateId = 0;
+    private int _newRamGb = 4;
+    private int _selectedMapId = 0;
+
+    private string _exportZipName = "";
+    private int _applyMapId = 0;
+
+    // 플러그인/모드 탭 상태
+    private List<AddonFile> _addons = new();
+    private HashSet<string> _installedPlugins = new();
+    private HashSet<string> _installedMods = new();
+
+    private string _statusMessage = "";
+    private bool _isError = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        AuthState.OnChange += HandleAuthStateChanged;
+        InstanceManager.OnLogBroadcast += HandleLogBroadcast;
+        InstanceManager.OnStatusBroadcast += HandleStatusBroadcast;
+        await LoadAllAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_selectedInstance != null && _activeTab == "console")
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("scrollToBottom", "mcws-console-box");
+            }
+            catch
+            {
+                // 회로 연결 종료 시 무시
+            }
+        }
+    }
+
+    private void HandleAuthStateChanged()
+    {
+        InvokeAsync(async () =>
+        {
+            await LoadAllAsync();
+            StateHasChanged();
+        });
+    }
+
+    private void HandleLogBroadcast(int instanceId, ConsoleLogLine line)
+    {
+        if (_selectedInstance?.Id == instanceId)
+        {
+            InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void HandleStatusBroadcast(int instanceId, ServerStatus status)
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadAllAsync()
+    {
+        _instances = await Db.ServerInstances.OrderBy(i => i.SlotNumber).ToListAsync();
+        _templates = await Db.ServerTemplates.OrderByDescending(t => t.UploadedAt).ToListAsync();
+        _worldMaps = await Db.WorldMaps.OrderByDescending(m => m.UploadedAt).ToListAsync();
+        _addons = await Db.AddonFiles.OrderBy(a => a.FileName).ToListAsync();
+    }
+
+    private void OpenCreateModal(int slot, int port)
+    {
+        _newSlotNumber = slot;
+        _newPort = port;
+        _newServerName = $"Minecraft Slot #{slot}";
+        _newRamGb = 4;
+        _selectedTemplateId = _templates.FirstOrDefault()?.Id ?? 0;
+        _selectedMapId = 0;
+        _showCreateModal = true;
+    }
+
+    private async Task CreateInstanceAsync()
+    {
+        if (AuthState.CurrentUser == null) return;
+
+        var template = _templates.FirstOrDefault(t => t.Id == _selectedTemplateId);
+        if (template == null)
+        {
+            _isError = true;
+            _statusMessage = "먼저 자료실(버킷 및 맵 보관소)에서 .jar 실행기 템플릿을 업로드하고 선택해주세요.";
+            return;
+        }
+
+        string slotDir = Path.Combine(InstanceManager.InstancesPath, $"slot-{_newSlotNumber}");
+        Directory.CreateDirectory(slotDir);
+
+        string propsPath = Path.Combine(slotDir, "server.properties");
+        if (!File.Exists(propsPath))
+        {
+            await File.WriteAllTextAsync(propsPath, $"server-port={_newPort}\nmotd={_newServerName}\n");
+        }
+
+        var newInst = new ServerInstance
+        {
+            SlotNumber = _newSlotNumber,
+            Port = _newPort,
+            Name = string.IsNullOrWhiteSpace(_newServerName) ? $"Server #{_newSlotNumber}" : _newServerName.Trim(),
+            AllocatedRamGb = _newRamGb,
+            JarFileName = template.FileName,
+            LoaderType = template.LoaderType,
+            JavaVersion = template.RecommendedJavaVersion,
+            WorkingDirectory = slotDir,
+            Status = ServerStatus.Offline,
+            CreatedBy = AuthState.CurrentUser.Username
+        };
+
+        Db.ServerInstances.Add(newInst);
+        Db.AuditLogs.Add(new AuditLog
+        {
+            Username = AuthState.CurrentUser.Username,
+            Action = "서버 생성",
+            Target = $"{newInst.Name} (Slot #{newInst.SlotNumber}, Port {newInst.Port}, {newInst.AllocatedRamGb}GB)"
+        });
+        await Db.SaveChangesAsync();
+
+        if (_selectedMapId > 0)
+        {
+            await InstanceManager.ApplyWorldMapAsync(newInst.Id, _selectedMapId, AuthState.CurrentUser.Username);
+        }
+        else
+        {
+            await InstanceManager.ResetWorldAsync(newInst.Id, AuthState.CurrentUser.Username);
+        }
+
+        _showCreateModal = false;
+        _isError = false;
+        _statusMessage = $"SLOT #{newInst.SlotNumber} 서버 인스턴스가 생성되었습니다.";
+        await LoadAllAsync();
+        SelectInstance(newInst);
+    }
+
+    private async Task StartServer(ServerInstance instance)
+    {
+        if (AuthState.CurrentUser == null) return;
+        var res = await InstanceManager.StartServerAsync(instance.Id, AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+        SelectInstance(instance);
+    }
+
+    private async Task StopServer(int instanceId)
+    {
+        if (AuthState.CurrentUser == null) return;
+        var res = await InstanceManager.StopServerAsync(instanceId, AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+    }
+
+    private async Task DeleteInstance(int instanceId)
+    {
+        if (AuthState.CurrentUser == null) return;
+        var res = await InstanceManager.DeleteInstanceAsync(instanceId, AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+        if (res.Success && _selectedInstance?.Id == instanceId)
+        {
+            _selectedInstance = null;
+        }
+        await LoadAllAsync();
+    }
+
+    private void SelectInstance(ServerInstance instance)
+    {
+        _selectedInstance = instance;
+        SwitchTab(_activeTab);
+    }
+
+    private void SwitchTab(string tab)
+    {
+        _activeTab = tab;
+        if (_selectedInstance == null) return;
+
+        if (tab == "eula")
+        {
+            string path = Path.Combine(_selectedInstance.WorkingDirectory, "eula.txt");
+            _configEditorText = File.Exists(path) ? File.ReadAllText(path) : "# 아직 생성된 eula.txt가 없습니다. 원클릭 동의 버튼을 누르면 즉시 생성됩니다.\neula=false\n";
+        }
+        else if (tab == "props")
+        {
+            string path = Path.Combine(_selectedInstance.WorkingDirectory, "server.properties");
+            _configEditorText = File.Exists(path) ? File.ReadAllText(path) : $"server-port={_selectedInstance.Port}\n";
+        }
+        else if (tab == "addons")
+        {
+            RefreshInstalledAddons();
+        }
+    }
+
+    // 슬롯 로더 타입에 따라 보여줄 탭 결정 (플러그인 서버에 모드를 넣는 실수 방지)
+    private AddonType[] AllowedAddonTypes(ServerLoaderType loader) => loader switch
+    {
+        ServerLoaderType.ModOnly => [AddonType.Mod],
+        ServerLoaderType.Hybrid => [AddonType.Plugin, AddonType.Mod],
+        _ => [AddonType.Plugin]
+    };
+
+    // 슬롯 폴더(plugins/, mods/)를 직접 읽어 현재 장착 상태를 확인
+    private void RefreshInstalledAddons()
+    {
+        if (_selectedInstance == null) return;
+        _installedPlugins = InstanceManager.GetInstalledAddons(_selectedInstance.WorkingDirectory, AddonType.Plugin).ToHashSet();
+        _installedMods = InstanceManager.GetInstalledAddons(_selectedInstance.WorkingDirectory, AddonType.Mod).ToHashSet();
+    }
+
+    private async Task ToggleAddonAsync(AddonFile addon, bool install)
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null) return;
+
+        var res = install
+            ? await InstanceManager.InstallAddonToSlotAsync(_selectedInstance.Id, addon.FileName, addon.Type, AuthState.CurrentUser.Username)
+            : await InstanceManager.RemoveAddonFromSlotAsync(_selectedInstance.Id, addon.FileName, addon.Type, AuthState.CurrentUser.Username);
+
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+        RefreshInstalledAddons();
+    }
+
+    private async Task AgreeEulaAsync()
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null) return;
+        string path = Path.Combine(_selectedInstance.WorkingDirectory, "eula.txt");
+        Directory.CreateDirectory(_selectedInstance.WorkingDirectory);
+        _configEditorText = "eula=true\n";
+        await File.WriteAllTextAsync(path, _configEditorText);
+
+        Db.AuditLogs.Add(new AuditLog
+        {
+            Username = AuthState.CurrentUser.Username,
+            Action = "EULA 동의 저장",
+            Target = $"{_selectedInstance.Name} (eula=true)"
+        });
+        await Db.SaveChangesAsync();
+
+        _isError = false;
+        _statusMessage = "eula.txt에 eula=true가 저장되었습니다.";
+    }
+
+    private async Task SaveConfigFileAsync()
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null) return;
+        string fileName = _activeTab == "eula" ? "eula.txt" : "server.properties";
+        string path = Path.Combine(_selectedInstance.WorkingDirectory, fileName);
+        Directory.CreateDirectory(_selectedInstance.WorkingDirectory);
+        await File.WriteAllTextAsync(path, _configEditorText);
+
+        Db.AuditLogs.Add(new AuditLog
+        {
+            Username = AuthState.CurrentUser.Username,
+            Action = "설정 파일 수정",
+            Target = $"{_selectedInstance.Name} ({fileName})"
+        });
+        await Db.SaveChangesAsync();
+
+        _isError = false;
+        _statusMessage = $"{fileName} 파일이 저장되었습니다.";
+    }
+
+    private async Task SendConsoleCommandAsync()
+    {
+        if (_selectedInstance == null || string.IsNullOrWhiteSpace(_commandInput)) return;
+        await InstanceManager.SendCommandAsync(_selectedInstance.Id, _commandInput.Trim());
+        _commandInput = "";
+    }
+
+    private async Task HandleCommandKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await SendConsoleCommandAsync();
+        }
+    }
+
+    private async Task ExportWorldAsync()
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null) return;
+        var res = await InstanceManager.ExportWorldMapAsync(_selectedInstance.Id, _exportZipName.Trim(), AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+        _exportZipName = "";
+        await LoadAllAsync();
+    }
+
+    private async Task ApplyWorldAsync()
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null || _applyMapId <= 0) return;
+        var res = await InstanceManager.ApplyWorldMapAsync(_selectedInstance.Id, _applyMapId, AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+    }
+
+    private async Task ResetWorldAsync()
+    {
+        if (_selectedInstance == null || AuthState.CurrentUser == null) return;
+        var res = await InstanceManager.ResetWorldAsync(_selectedInstance.Id, AuthState.CurrentUser.Username);
+        _isError = !res.Success;
+        _statusMessage = res.Message;
+    }
+
+    private string GetStatusBadgeClass(ServerStatus status) => status switch
+    {
+        ServerStatus.Running => "bg-success",
+        ServerStatus.Starting => "bg-info text-dark",
+        ServerStatus.Stopping => "bg-warning text-dark",
+        _ => "bg-secondary"
+    };
+
+    public void Dispose()
+    {
+        AuthState.OnChange -= HandleAuthStateChanged;
+        InstanceManager.OnLogBroadcast -= HandleLogBroadcast;
+        InstanceManager.OnStatusBroadcast -= HandleStatusBroadcast;
+    }
+}

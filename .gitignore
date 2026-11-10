@@ -1,0 +1,11 @@
+bin/
+obj/
+publish/
+publish_linux/
+storage/
+.vs/
+*.db
+*.db-shm
+*.db-wal
+*.tar.gz
+Blazor_Guide.md
