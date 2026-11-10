@@ -9,3 +9,5 @@ storage/
 *.db-wal
 *.tar.gz
 Blazor_Guide.md
+Components/Pages/Counter.razor
+Components/Pages/Weather.razor
