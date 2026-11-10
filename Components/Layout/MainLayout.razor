@@ -1,14 +1,47 @@
 @inherits LayoutComponentBase
+@implements IDisposable
 @inject AuthStateService AuthState
+@inject NavigationManager Nav
+@inject IJSRuntime JS
 
-<div class="page" style="background-color: #121214; min-height: 100vh;">
+<div class="page">
     <div class="sidebar">
         <NavMenu />
     </div>
 
     <main>
-        <article class="content px-4" style="background-color: #121214; color: #e1e1e6; min-height: 100vh;">
-            @Body
+        <div class="top-row px-4">
+            <div class="d-flex align-items-center gap-3">
+                <button class="btn-mcws-secondary btn-mcws-sm" @onclick="ToggleThemeAsync">
+                    @(_isLightMode ? "Dark Mode" : "Light Mode")
+                </button>
+
+                @if (AuthState.IsLoggedIn && AuthState.CurrentUser != null)
+                {
+                    <span class="small" style="color: var(--mcws-text-secondary);">
+                        <strong>@AuthState.CurrentUser.Username</strong>
+                    </span>
+                    <span class="mcws-badge @GetRoleBadgeClass(AuthState.CurrentUser.Role)">
+                        @AuthState.CurrentUser.Role
+                    </span>
+                    <button class="btn-mcws-secondary btn-mcws-sm" @onclick="HandleLogoutAsync">
+                        로그아웃
+                    </button>
+                }
+                else
+                {
+                    <a href="/login" class="btn-mcws-primary btn-mcws-sm" style="text-decoration: none;">
+                        로그인
+                    </a>
+                }
+            </div>
+        </div>
+
+        <article class="content px-4 pb-5">
+            @if (_sessionChecked)
+            {
+                @Body
+            }
         </article>
     </main>
 </div>
@@ -16,17 +49,67 @@
 <div id="blazor-error-ui" data-nosnippet>
     오류가 발생했습니다.
     <a href="." class="reload">새로고침</a>
-    <span class="dismiss">🗙</span>
+    <span class="dismiss">X</span>
 </div>
 
 @code {
-    // 브라우저 새로고침(F5) 시 암호화된 저장소에서 로그인 상태를 자동으로 복원
+    private bool _isLightMode = false;
+    private bool _sessionChecked = false;
+
+    protected override void OnInitialized()
+    {
+        AuthState.OnChange += HandleAuthStateChanged;
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
         {
             await AuthState.RestoreSessionAsync();
+            _sessionChecked = true;
+            EnforceAuthRedirect();
             StateHasChanged();
         }
+    }
+
+    private void HandleAuthStateChanged()
+    {
+        EnforceAuthRedirect();
+        StateHasChanged();
+    }
+
+    private void EnforceAuthRedirect()
+    {
+        if (!_sessionChecked) return;
+        string relativePath = Nav.ToBaseRelativePath(Nav.Uri).Trim('/');
+        if (!AuthState.IsLoggedIn && !relativePath.Equals("login", StringComparison.OrdinalIgnoreCase))
+        {
+            Nav.NavigateTo("/login");
+        }
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        _isLightMode = !_isLightMode;
+        string theme = _isLightMode ? "light" : "dark";
+        await JS.InvokeVoidAsync("document.documentElement.setAttribute", "data-theme", theme);
+    }
+
+    private async Task HandleLogoutAsync()
+    {
+        await AuthState.LogoutAsync();
+        Nav.NavigateTo("/login");
+    }
+
+    private string GetRoleBadgeClass(UserRole role) => role switch
+    {
+        UserRole.Master => "badge-master",
+        UserRole.Admin => "badge-admin",
+        _ => "badge-offline"
+    };
+
+    public void Dispose()
+    {
+        AuthState.OnChange -= HandleAuthStateChanged;
     }
 }

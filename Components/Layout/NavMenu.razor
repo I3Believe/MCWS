@@ -1,58 +1,60 @@
 @implements IDisposable
 @inject AuthStateService AuthState
 
-<div class="top-row ps-3 navbar navbar-dark" style="background-color: #0b0b0d;">
+<div class="top-row ps-3 navbar">
     <div class="container-fluid">
-        <a class="navbar-brand fw-bold" href="" style="color: #00d26a;">MCWS Panel</a>
+        <a class="navbar-brand fw-bold" href="" style="color: var(--mcws-primary);">
+            MCWS v2
+        </a>
     </div>
 </div>
 
 <input type="checkbox" title="Navigation menu" class="navbar-toggler" />
 
-<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()" style="background-color: #121214;">
-    <nav class="nav flex-column">
-        <div class="nav-item px-3">
-            <NavLink class="nav-link text-white" href="" Match="NavLinkMatch.All">
-                서버 대시보드
-            </NavLink>
-        </div>
-
+<div class="nav-scrollable" onclick="document.querySelector('.navbar-toggler').click()">
+    <nav class="nav flex-column pt-2">
         @if (AuthState.IsLoggedIn)
         {
             <div class="nav-item px-3">
-                <NavLink class="nav-link text-white" href="storage">
-                    버킷 및 맵 보관소
+                <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
+                    대시보드 (슬롯 제어)
                 </NavLink>
             </div>
 
             <div class="nav-item px-3">
-                <NavLink class="nav-link text-white" href="admin">
-                    계정 관리 및 감사 로그
+                <NavLink class="nav-link" href="storage">
+                    보관소 관리
+                </NavLink>
+            </div>
+
+            @if (AuthState.IsAdminOrMaster)
+            {
+                <div class="nav-item px-3">
+                    <NavLink class="nav-link" href="admin">
+                        관리자 센터
+                    </NavLink>
+                </div>
+            }
+        }
+        else
+        {
+            <div class="nav-item px-3">
+                <NavLink class="nav-link" href="login">
+                    로그인 / 회원가입
                 </NavLink>
             </div>
         }
-
-        <div class="nav-item px-3">
-            <NavLink class="nav-link text-white" href="login">
-                @(AuthState.IsLoggedIn ? $"내 계정 ({AuthState.CurrentUser?.Username})" : "로그인 / 회원가입")
-            </NavLink>
-        </div>
     </nav>
 </div>
 
 @code {
     protected override void OnInitialized()
     {
-        AuthState.OnChange += RefreshMenu;
-    }
-
-    private void RefreshMenu()
-    {
-        InvokeAsync(StateHasChanged);
+        AuthState.OnChange += StateHasChanged;
     }
 
     public void Dispose()
     {
-        AuthState.OnChange -= RefreshMenu;
+        AuthState.OnChange -= StateHasChanged;
     }
 }

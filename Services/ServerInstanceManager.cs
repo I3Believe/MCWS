@@ -1,121 +1,163 @@
 using System.Collections.Concurrent;
-using System.IO.Compression;
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
-using MCWS.Data;
-using MCWS.Models;
+using MCWS_v2.Data;
+using MCWS_v2.Models;
 
-namespace MCWS.Services;
+namespace MCWS_v2.Services;
 
 public class ServerInstanceManager
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly StorageService _storage;
+    private readonly SystemMetricsService _metrics;
     private readonly ConcurrentDictionary<int, ServerProcess> _processes = new();
-
-    // 모든 파일이 저장될 기준 폴더 (실행 위치 아래 storage 폴더)
-    public string BaseStoragePath => Path.Combine(Directory.GetCurrentDirectory(), "storage");
-    public string JarsPath => Path.Combine(BaseStoragePath, "templates", "jars");
-    public string MapsPath => Path.Combine(BaseStoragePath, "templates", "maps");
-    public string PluginsPath => Path.Combine(BaseStoragePath, "templates", "plugins");
-    public string ModsPath => Path.Combine(BaseStoragePath, "templates", "mods");
-    public string InstancesPath => Path.Combine(BaseStoragePath, "instances");
 
     // 웹 화면으로 실시간 로그와 상태를 쏴주는 이벤트
     public event Action<int, ConsoleLogLine>? OnLogBroadcast;
     public event Action<int, ServerStatus>? OnStatusBroadcast;
 
-    public ServerInstanceManager(IServiceScopeFactory scopeFactory)
+    public ServerInstanceManager(
+        IServiceScopeFactory scopeFactory,
+        StorageService storage,
+        SystemMetricsService metrics)
     {
         _scopeFactory = scopeFactory;
-        Directory.CreateDirectory(JarsPath);
-        Directory.CreateDirectory(MapsPath);
-        Directory.CreateDirectory(PluginsPath);
-        Directory.CreateDirectory(ModsPath);
-
-        Directory.CreateDirectory(InstancesPath);
+        _storage = storage;
+        _metrics = metrics;
     }
 
-    public ServerStatus GetStatus(int instanceId)
-    {
-        return _processes.TryGetValue(instanceId, out var proc) ? proc.Status : ServerStatus.Offline;
-    }
+    public ServerStatus GetStatus(int instanceId) =>
+        _processes.TryGetValue(instanceId, out var proc) ? proc.Status : ServerStatus.Offline;
 
-    public IReadOnlyList<ConsoleLogLine> GetLogs(int instanceId)
-    {
-        return _processes.TryGetValue(instanceId, out var proc) ? proc.GetRecentLogs() : Array.Empty<ConsoleLogLine>();
-    }
+    public IReadOnlyList<ConsoleLogLine> GetLogs(int instanceId) =>
+        _processes.TryGetValue(instanceId, out var proc) ? proc.GetRecentLogs() : Array.Empty<ConsoleLogLine>();
 
-    // 1. REQ-06: 실제 OS의 현재 가용(남은) RAM 용량(GB) 실시간 측정
-    public double GetHostAvailableRamGb()
+    // 0. 대시보드 화면용 슬롯 목록 조회 및 신규 슬롯 생성 (화면에서 DB/폴더 직접 접근 차단)
+    public async Task<List<ServerInstance>> GetServerInstancesAsync()
     {
-        try
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var list = await db.ServerInstances.OrderBy(s => s.SlotNumber).ToListAsync();
+
+        // 현재 실행 중인 프로세스 상태를 인스턴스 객체에 동기화
+        foreach (var inst in list)
         {
-            // OCI Ubuntu(리눅스) 환경일 때: /proc/meminfo에서 실제 MemAvailable 읽기
-            if (OperatingSystem.IsLinux() && File.Exists("/proc/meminfo"))
-            {
-                foreach (var line in File.ReadLines("/proc/meminfo"))
-                {
-                    if (line.StartsWith("MemAvailable:"))
-                    {
-                        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        if (long.TryParse(parts[1], out long kb))
-                            return Math.Round(kb / (1024.0 * 1024.0), 1); // KB -> GB 변환
-                    }
-                }
-            }
+            inst.Status = GetStatus(inst.Id);
         }
-        catch { }
-
-        // 윈도우(개발 PC) 환경일 때: .NET GC 메모리 정보 활용
-        var info = GC.GetGCMemoryInfo();
-        double totalGb = info.TotalAvailableMemoryBytes / (1024.0 * 1024.0 * 1024.0);
-        return Math.Round(totalGb, 1);
+        return list;
     }
 
-    // 2. 서버 시작 (가용 RAM 체크 + 슬롯별 .jar 독립 복사 + 포트 고정 + 감사 로그 기록)
-    public async Task<(bool Success, string Message)> StartServerAsync(int instanceId, string actorUsername)
+    public async Task<(bool Success, ResultCode Code)> CreateServerInstanceAsync(
+        int slotNumber,
+        string name,
+        int allocatedRamGb,
+        int templateId,
+        string actorUsername)
+    {
+        if (string.IsNullOrWhiteSpace(name) || slotNumber < 1 || slotNumber > 3 || templateId <= 0)
+            return (false, ResultCode.InvalidSlotInput);
+
+        using var scope = _scopeFactory.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        // 이미 해당 슬롯 번호나 이름이 사용 중인지 확인
+        bool exists = await db.ServerInstances.AnyAsync(
+            s => s.SlotNumber == slotNumber || s.Name.ToLower() == name.Trim().ToLower());
+        if (exists)
+            return (false, ResultCode.DuplicateSlotOrName);
+
+        var template = await db.ServerTemplates.FindAsync(templateId);
+        if (template == null)
+            return (false, ResultCode.NotFoundFile);
+
+        int port = 25564 + slotNumber; // 슬롯 1 -> 25565, 슬롯 2 -> 25566, 슬롯 3 -> 25567
+        string workingDir = Path.Combine(_storage.InstancesPath, $"slot-{slotNumber}");
+        Directory.CreateDirectory(workingDir);
+
+        await _storage.EnsureServerPortAsync(workingDir, port);
+
+        var instance = new ServerInstance
+        {
+            SlotNumber = slotNumber,
+            Port = port,
+            Name = name.Trim(),
+            AllocatedRamGb = allocatedRamGb,
+            JarFileName = template.FileName,
+            LoaderType = template.LoaderType,
+            JavaVersion = template.RecommendedJavaVersion,
+            WorkingDirectory = workingDir,
+            CreatedBy = actorUsername,
+            Status = ServerStatus.Offline,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        db.ServerInstances.Add(instance);
+        db.AuditLogs.Add(new AuditLog
+        {
+            Username = actorUsername,
+            Action = "서버 슬롯 생성",
+            Target = $"슬롯 {slotNumber} ({instance.Name}, Port: {port}, {allocatedRamGb}GB)"
+        });
+        await db.SaveChangesAsync();
+
+        return (true, ResultCode.SuccessServerCreated);
+    }
+
+    // 1. 현재 실행 중인 마크 서버들의 예약 램(-Xmx)을 반영한 정밀 램 상태 조회
+    public RamMetrics GetCurrentRamMetrics()
+    {
+        var aliveProcs = _processes.Values.Where(p => p.IsAlive).ToList();
+
+        var rawOsProcs = aliveProcs
+            .Select(p => p.RawProcess)
+            .Where(p => p != null)
+            .Cast<Process>();
+
+        int reservedRamGbSum = aliveProcs.Sum(p => p.AllocatedRamGb);
+
+        return _metrics.GetRamMetrics(rawOsProcs, reservedRamGbSum);
+    }
+
+    // 2. 서버 시작 (안전 가용 램 체크 + 포트 고정 + 슬롯별 .jar 복사 + 프로세스 실행)
+    public async Task<(bool Success, ResultCode Code)> StartServerAsync(int instanceId, string actorUsername)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var instance = await db.ServerInstances.FindAsync(instanceId);
         if (instance == null)
-            return (false, "서버 인스턴스를 찾을 수 없습니다.");
+            return (false, ResultCode.NotFoundInstance);
 
         var proc = GetOrCreateProcess(instanceId);
         if (proc.IsAlive)
-            return (false, "이미 실행 중인 서버입니다.");
+            return (false, ResultCode.ServerAlreadyRunning);
 
-        // REQ-06: 호스트 가용 메모리 초과 방어 (최소 1.5GB는 OS 여유분으로 남김)
-        double availableGb = GetHostAvailableRamGb();
-        if (instance.AllocatedRamGb > availableGb - 1.5)
-        {
-            return (false, $"호스트 가용 메모리가 부족합니다! (요청: {instance.AllocatedRamGb}GB, 현재 여유: {availableGb}GB)");
-        }
+        // 예약 기반 안전 가용 램 확인
+        var ramMetrics = GetCurrentRamMetrics();
+        if (instance.AllocatedRamGb > ramMetrics.SafeAvailableRamGb)
+            return (false, ResultCode.NotEnoughRam);
 
-        // REQ-04: 공용 보관소에 버킷(.jar) 파일이 있는지 확인
-        string templateJarPath = Path.Combine(JarsPath, instance.JarFileName);
+        // 공용 보관소에 버킷(.jar) 파일이 있는지 확인
+        string templateJarPath = Path.Combine(_storage.JarsPath, instance.JarFileName);
         if (!File.Exists(templateJarPath))
-            return (false, $"버킷 파일({instance.JarFileName})이 보관소에 없습니다.");
+            return (false, ResultCode.NotFoundFile);
 
-        // REQ-01: 독립 작업 폴더 준비 및 server.properties 포트 강제 고정
-        Directory.CreateDirectory(instance.WorkingDirectory);
-        await EnsureServerPortAsync(instance.WorkingDirectory, instance.Port);
+        // 독립 작업 폴더 준비 및 server.properties 포트 강제 고정
+        await _storage.EnsureServerPortAsync(instance.WorkingDirectory, instance.Port);
 
-        // 다중 슬롯에서 동일한 버킷(.jar)을 동시에 실행할 때 파일 잠금(Lock) 및 I/O 병목을 막기 위해 슬롯 폴더로 복사
+        // 다중 슬롯 동시 실행 시 파일 잠금 방지를 위해 슬롯 폴더로 .jar 복사
         string localJarPath = Path.Combine(instance.WorkingDirectory, instance.JarFileName);
         if (!File.Exists(localJarPath) || new FileInfo(localJarPath).Length != new FileInfo(templateJarPath).Length)
         {
             File.Copy(templateJarPath, localJarPath, overwrite: true);
         }
 
-        // REQ-05: Java 버전(8, 17, 21, 25)에 맞는 실행 경로 찾기
         string javaExec = ResolveJavaPath(instance.JavaVersion);
-
         bool started = proc.Start(javaExec, localJarPath, instance.AllocatedRamGb, instance.WorkingDirectory);
         if (!started)
-            return (false, "자바 프로세스 실행에 실패했습니다.");
+            return (false, ResultCode.ProcessStartFailed);
 
-        // 누가 서버를 켰는지 AuditLog 장부에 박제
         db.AuditLogs.Add(new AuditLog
         {
             Username = actorUsername,
@@ -124,14 +166,14 @@ public class ServerInstanceManager
         });
         await db.SaveChangesAsync();
 
-        return (true, $"'{instance.Name}' 서버 부팅을 시작했습니다.");
+        return (true, ResultCode.SuccessServerStarted);
     }
 
-    // 3. 서버 안전 종료 (REQ-02 + 감사 로그 기록)
-    public async Task<(bool Success, string Message)> StopServerAsync(int instanceId, string actorUsername)
+    // 3. 서버 안전 종료 (stop 명령어 주입 후 대기)
+    public async Task<(bool Success, ResultCode Code)> StopServerAsync(int instanceId, string actorUsername)
     {
         if (!_processes.TryGetValue(instanceId, out var proc) || !proc.IsAlive)
-            return (false, "현재 실행 중인 서버가 아닙니다.");
+            return (false, ResultCode.ServerNotOffline);
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -146,22 +188,20 @@ public class ServerInstanceManager
         await db.SaveChangesAsync();
 
         await proc.StopGracefullyAsync();
-        return (true, "서버가 안전하게 저장 및 종료되었습니다.");
+        return (true, ResultCode.SuccessServerStopped);
     }
 
-    // 웹 서버(MCWS) 자체가 종료될 때 켜져 있는 모든 마인크래프트 서버를 안전하게 저장 후 종료 (고아 프로세스 방지)
+    // 4. 웹 서버(MCWS) 종료 시 켜져 있는 모든 마크 서버 일괄 안전 종료
     public async Task ShutdownAllAsync()
     {
         var runningProcs = _processes.Values.Where(p => p.IsAlive).ToList();
         if (runningProcs.Count == 0) return;
 
-        Console.WriteLine($"[MCWS] 웹 서버 종료 감지: 실행 중인 마인크래프트 서버 {runningProcs.Count}개를 안전 종료(stop)합니다...");
         var stopTasks = runningProcs.Select(p => p.StopGracefullyAsync(timeoutSeconds: 60));
         await Task.WhenAll(stopTasks);
-        Console.WriteLine("[MCWS] 모든 마인크래프트 서버가 안전하게 종료되었습니다.");
     }
 
-    // 4. 명령어 전송 (REQ-12)
+    // 5. 콘솔 명령어 전송
     public async Task<bool> SendCommandAsync(int instanceId, string command)
     {
         if (!_processes.TryGetValue(instanceId, out var proc) || !proc.IsAlive)
@@ -170,27 +210,22 @@ public class ServerInstanceManager
         return await proc.SendCommandAsync(command);
     }
 
-    // 5. REQ-03: 인스턴스 삭제 (실행 중일 때는 원천 차단 + 디스크 슬롯 폴더까지 완전 초기화!)
-    public async Task<(bool Success, string Message)> DeleteInstanceAsync(int instanceId, string actorUsername)
+    // 6. 인스턴스 삭제 (꺼져 있을 때만 허용 + 슬롯 폴더 및 DB 삭제)
+    public async Task<(bool Success, ResultCode Code)> DeleteInstanceAsync(int instanceId, string actorUsername)
     {
         if (GetStatus(instanceId) != ServerStatus.Offline)
-            return (false, "실행 중이거나 부팅/종료 중인 서버는 삭제할 수 없습니다! 먼저 완전히 종료해주세요.");
+            return (false, ResultCode.ServerNotOffline);
 
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var instance = await db.ServerInstances.FindAsync(instanceId);
         if (instance == null)
-            return (false, "삭제할 서버를 찾을 수 없습니다.");
+            return (false, ResultCode.NotFoundInstance);
 
-        // 슬롯 삭제 시 기존 월드 및 설정 파일이 남지 않도록 슬롯 폴더(WorkingDirectory)도 함께 삭제
         if (Directory.Exists(instance.WorkingDirectory))
         {
-            try
-            {
-                Directory.Delete(instance.WorkingDirectory, recursive: true);
-            }
-            catch { }
+            Directory.Delete(instance.WorkingDirectory, recursive: true);
         }
 
         db.ServerInstances.Remove(instance);
@@ -203,162 +238,34 @@ public class ServerInstanceManager
         await db.SaveChangesAsync();
 
         _processes.TryRemove(instanceId, out _);
-        return (true, $"슬롯 {instance.SlotNumber} 서버와 기존 월드 데이터가 모두 초기화(삭제)되었습니다.");
+        return (true, ResultCode.SuccessServerDeleted);
     }
 
-    // 5-2. 월드 초기화 (서버 설정/EULA는 유지하고 world, world_nether, world_the_end만 삭제하여 새 월드 생성)
-    public async Task<(bool Success, string Message)> ResetWorldAsync(int instanceId, string actorUsername)
+    // 7. 슬롯 설정 파일(eula.txt / server.properties) 저장 및 감사 로그 기록
+    public async Task<(bool Success, ResultCode Code)> SaveServerConfigAsync(
+        int instanceId,
+        string fileName,
+        string content,
+        string actorUsername)
     {
-        if (GetStatus(instanceId) != ServerStatus.Offline)
-            return (false, "서버가 Offline(종료) 상태일 때만 월드를 초기화할 수 있습니다.");
-
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var instance = await db.ServerInstances.FindAsync(instanceId);
         if (instance == null)
-            return (false, "서버 정보를 찾을 수 없습니다.");
+            return (false, ResultCode.NotFoundInstance);
 
-        DeleteWorldFolders(instance.WorkingDirectory);
+        await _storage.WriteConfigFileAsync(instance.WorkingDirectory, fileName, content);
 
         db.AuditLogs.Add(new AuditLog
         {
             Username = actorUsername,
-            Action = "월드 초기화",
+            Action = $"설정 파일 저장 ({fileName})",
             Target = $"슬롯 {instance.SlotNumber} ({instance.Name})"
         });
         await db.SaveChangesAsync();
 
-        return (true, $"슬롯 {instance.SlotNumber}의 기존 월드가 삭제되었습니다. 서버를 시작하면 새로운 월드가 생성됩니다.");
-    }
-
-    // 6. REQ-07: 보관소의 월드 맵(.zip)을 서버의 world 폴더에 압축 해제하여 적용
-    public async Task<(bool Success, string Message)> ApplyWorldMapAsync(int instanceId, int mapId, string actorUsername)
-    {
-        if (GetStatus(instanceId) != ServerStatus.Offline)
-            return (false, "서버가 꺼져 있을 때만 월드 맵을 교체할 수 있습니다.");
-
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var instance = await db.ServerInstances.FindAsync(instanceId);
-        var map = await db.WorldMaps.FindAsync(mapId);
-        if (instance == null || map == null)
-            return (false, "서버 또는 맵 정보를 찾을 수 없습니다.");
-
-        string zipPath = Path.Combine(MapsPath, map.FileName);
-        if (!File.Exists(zipPath))
-            return (false, $"맵 파일({map.FileName})이 디스크에 없습니다.");
-
-        // 기존 오버월드/네더/엔더 폴더 모두 제거
-        DeleteWorldFolders(instance.WorkingDirectory);
-
-        string worldDir = Path.Combine(instance.WorkingDirectory, "world");
-        Directory.CreateDirectory(worldDir);
-        ZipFile.ExtractToDirectory(zipPath, worldDir);
-
-        // 만약 .zip 파일 안에 상위 폴더가 한 겹 더 감싸져 있다면(예: world/맵이름/level.dat) 자동으로 한 단계 꺼내주기
-        FlattenNestedWorldFolder(worldDir);
-
-        db.AuditLogs.Add(new AuditLog
-        {
-            Username = actorUsername,
-            Action = "월드 맵 적용",
-            Target = $"슬롯 {instance.SlotNumber} <- {map.FileName}"
-        });
-        await db.SaveChangesAsync();
-
-        return (true, $"'{map.FileName}' 맵이 슬롯 {instance.SlotNumber}에 적용되었습니다.");
-    }
-
-    // 7. REQ-08: 현재 플레이 중인 world 폴더를 압축해서 맵 보관소로 백업(Export)
-    public async Task<(bool Success, string Message)> ExportWorldMapAsync(int instanceId, string customFileName, string actorUsername)
-    {
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var instance = await db.ServerInstances.FindAsync(instanceId);
-        if (instance == null)
-            return (false, "서버를 찾을 수 없습니다.");
-
-        // 실행 중이면 save-all flush로 메모리 데이터를 디스크에 강제 기록 후 압축
-        if (_processes.TryGetValue(instanceId, out var proc) && proc.IsAlive)
-        {
-            await proc.SendCommandAsync("save-all flush");
-            await Task.Delay(2000);
-        }
-
-        string worldDir = Path.Combine(instance.WorkingDirectory, "world");
-        if (!Directory.Exists(worldDir))
-            return (false, "아직 생성된 world 폴더가 없습니다. 서버를 한 번 이상 실행해주세요.");
-
-        string safeName = string.IsNullOrWhiteSpace(customFileName)
-            ? $"slot{instance.SlotNumber}_backup_{DateTime.Now:yyyyMMdd_HHmmss}.zip"
-            : (customFileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) ? customFileName.Trim() : $"{customFileName.Trim()}.zip");
-
-        string zipPath = Path.Combine(MapsPath, safeName);
-        if (File.Exists(zipPath)) File.Delete(zipPath);
-
-        ZipFile.CreateFromDirectory(worldDir, zipPath, CompressionLevel.Optimal, includeBaseDirectory: false);
-
-        var fi = new FileInfo(zipPath);
-        db.WorldMaps.Add(new WorldMap
-        {
-            FileName = safeName,
-            FileSizeBytes = fi.Length,
-            UploadedAt = DateTime.UtcNow
-        });
-
-        db.AuditLogs.Add(new AuditLog
-        {
-            Username = actorUsername,
-            Action = "월드 맵 백업(Export)",
-            Target = $"슬롯 {instance.SlotNumber} -> {safeName}"
-        });
-        await db.SaveChangesAsync();
-
-        return (true, $"현재 월드가 '{safeName}' 이름으로 보관소에 백업되었습니다.");
-    }
-
-    private void DeleteWorldFolders(string workingDir)
-    {
-        string[] worldDirs = ["world", "world_nether", "world_the_end"];
-        foreach (var dirName in worldDirs)
-        {
-            string fullPath = Path.Combine(workingDir, dirName);
-            if (Directory.Exists(fullPath))
-            {
-                Directory.Delete(fullPath, recursive: true);
-            }
-        }
-    }
-
-    private void FlattenNestedWorldFolder(string worldDir)
-    {
-        // world/level.dat가 바로 있으면 정상 구조
-        if (File.Exists(Path.Combine(worldDir, "level.dat"))) return;
-
-        // 하위 폴더 안에 level.dat가 있는 경우 해당 폴더의 내용물을 worldDir 루트로 이동
-        var subDirs = Directory.GetDirectories(worldDir);
-        foreach (var sub in subDirs)
-        {
-            if (File.Exists(Path.Combine(sub, "level.dat")))
-            {
-                foreach (var file in Directory.GetFiles(sub))
-                {
-                    string destFile = Path.Combine(worldDir, Path.GetFileName(file));
-                    File.Move(file, destFile, overwrite: true);
-                }
-                foreach (var dir in Directory.GetDirectories(sub))
-                {
-                    string destDir = Path.Combine(worldDir, Path.GetFileName(dir));
-                    if (Directory.Exists(destDir)) Directory.Delete(destDir, recursive: true);
-                    Directory.Move(dir, destDir);
-                }
-                Directory.Delete(sub, recursive: true);
-                break;
-            }
-        }
+        return (true, ResultCode.SuccessConfigSaved);
     }
 
     private ServerProcess GetOrCreateProcess(int instanceId)
@@ -374,7 +281,6 @@ public class ServerInstanceManager
 
     private string ResolveJavaPath(int version)
     {
-        // 1. 리눅스/윈도우 환경변수(JAVA8_HOME, JAVA17_HOME, JAVA21_HOME, JAVA25_HOME) 우선 탐색
         string? home = Environment.GetEnvironmentVariable($"JAVA{version}_HOME");
         if (!string.IsNullOrEmpty(home))
         {
@@ -382,7 +288,6 @@ public class ServerInstanceManager
             if (File.Exists(bin)) return bin;
         }
 
-        // 2. OCI Ubuntu (ARM64 / AMD64) 표준 OpenJDK 설치 경로 자동 탐색
         if (OperatingSystem.IsLinux())
         {
             string[] candidates =
@@ -398,85 +303,5 @@ public class ServerInstanceManager
         }
 
         return "java";
-    }
-
-    private async Task EnsureServerPortAsync(string workingDir, int port)
-    {
-        string propPath = Path.Combine(workingDir, "server.properties");
-        var lines = File.Exists(propPath) ? (await File.ReadAllLinesAsync(propPath)).ToList() : new List<string>();
-
-        int idx = lines.FindIndex(l => l.StartsWith("server-port="));
-        if (idx >= 0) lines[idx] = $"server-port={port}";
-        else lines.Add($"server-port={port}");
-
-        await File.WriteAllLinesAsync(propPath, lines);
-    }
-
-    public List<string> GetInstalledAddons(string workingDirectory, AddonType type)
-    {
-        string subfolder = type == AddonType.Plugin ? "plugins" : "mods";
-        string targetDir = Path.Combine(workingDirectory, subfolder);
-        if (!Directory.Exists(targetDir)) return new List<string>();
-
-        return Directory.GetFiles(targetDir, "*.jar")
-            .Select(Path.GetFileName)
-            .Where(f => !string.IsNullOrEmpty(f))
-            .ToList()!;
-    }
-
-    public async Task<(bool Success, string Message)> InstallAddonToSlotAsync(int instanceId, string addonFileName, AddonType type, string actorUsername)
-    {
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var instance = await db.ServerInstances.FindAsync(instanceId);
-        if (instance == null) return (false, "서버 인스턴스를 찾을 수 없습니다.");
-
-        string sourceFolder = type == AddonType.Plugin ? PluginsPath : ModsPath;
-        string sourceFile = Path.Combine(sourceFolder, addonFileName);
-        if (!File.Exists(sourceFile)) return (false, "보관소에 해당 파일이 존재하지 않습니다.");
-
-        string targetFolder = Path.Combine(instance.WorkingDirectory, type == AddonType.Plugin ? "plugins" : "mods");
-        Directory.CreateDirectory(targetFolder);
-
-        string targetFile = Path.Combine(targetFolder, addonFileName);
-        File.Copy(sourceFile, targetFile, overwrite: true);
-
-        db.AuditLogs.Add(new AuditLog
-        {
-            Username = actorUsername,
-            Action = $"{(type == AddonType.Plugin ? "플러그인" : "모드")} 장착",
-            Target = $"슬롯 {instance.SlotNumber} <- {addonFileName}"
-        });
-        await db.SaveChangesAsync();
-
-        return (true, $"'{addonFileName}'이(가) 슬롯 {instance.SlotNumber}에 장착되었습니다.");
-    }
-
-    public async Task<(bool Success, string Message)> RemoveAddonFromSlotAsync(int instanceId, string addonFileName, AddonType type, string actorUsername)
-    {
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-        var instance = await db.ServerInstances.FindAsync(instanceId);
-        if (instance == null) return (false, "서버 인스터스를 찾을 수 없습니다.");
-
-        string targetFolder = Path.Combine(instance.WorkingDirectory, type == AddonType.Plugin ? "plugins" : "mods");
-        string targetFile = Path.Combine(targetFolder, addonFileName);
-
-        if (File.Exists(targetFile))
-        {
-            File.Delete(targetFile);
-        }
-
-        db.AuditLogs.Add(new AuditLog
-        {
-           Username = actorUsername,
-           Action = $"{(type == AddonType.Plugin ? "플러그인" : "모드")} 제거",
-           Target = $"슬롯 {instance.SlotNumber}에서 {addonFileName} 삭제" 
-        });
-        await db.SaveChangesAsync();
-
-        return (true, $"'{addonFileName}'이(가) 슬롯 {instance.SlotNumber}에서 제거되었습니다.");
     }
 }

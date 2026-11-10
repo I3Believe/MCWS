@@ -1,0 +1,273 @@
+@inject ServerInstanceManager InstanceManager
+@inject AddonService AddonService
+@inject StorageService StorageService
+@inject AuthStateService AuthState
+
+<div class="mcws-card mt-4">
+    <div class="mcws-card-header">
+        <div>
+            <h5 class="mcws-card-title">
+                슬롯 @Instance.SlotNumber 제어 패널 — @Instance.Name (Port: @Instance.Port)
+            </h5>
+            <span class="small" style="color: var(--mcws-text-secondary);">
+                버킷: @Instance.JarFileName | Java @Instance.JavaVersion | 로더: @Instance.LoaderType
+            </span>
+        </div>
+    </div>
+
+    @if (_resultCode != null)
+    {
+        <div class="mcws-alert @(_isError ? "mcws-alert-danger" : "mcws-alert-success")">
+            @_resultCode.Value.ToMessage()
+        </div>
+    }
+
+    <!-- 탭 메뉴 -->
+    <div class="d-flex flex-wrap gap-2 mb-3">
+        <button class="@(_activeTab == "console" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                @onclick='() => SwitchTabAsync("console")'>실시간 콘솔</button>
+        <button class="@(_activeTab == "eula" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                @onclick='() => SwitchTabAsync("eula")'>eula.txt</button>
+        <button class="@(_activeTab == "props" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                @onclick='() => SwitchTabAsync("props")'>server.properties</button>
+        <button class="@(_activeTab == "addons" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                @onclick='() => SwitchTabAsync("addons")'>월드 및 애드온 관리</button>
+    </div>
+
+    @if (_activeTab == "console")
+    {
+        <!-- 1. 실시간 콘솔 탭 -->
+        <div class="mcws-terminal mb-3">
+            @if (Logs.Count == 0)
+            {
+                <div style="color: var(--mcws-text-muted);">출력된 콘솔 로그가 없습니다.</div>
+            }
+            else
+            {
+                @foreach (var line in Logs)
+                {
+                    <div class="@(line.IsError ? "mcws-terminal-error" : line.Text.StartsWith(">") ? "mcws-terminal-cmd" : "")">
+                        [@line.Timestamp.ToLocalTime().ToString("HH:mm:ss")] @line.Text
+                    </div>
+                }
+            }
+        </div>
+
+        <div class="d-flex gap-2">
+            <input class="mcws-input" placeholder="명령어 입력 (예: list, op 아이디, say 안녕하세요)"
+                   @bind="_commandInput" @bind:event="oninput" @onkeydown="HandleKeyDownAsync" />
+            <button class="btn-mcws-primary" style="min-width: 90px;" @onclick="SendCommandAsync">전송</button>
+        </div>
+    }
+    else if (_activeTab == "eula" || _activeTab == "props")
+    {
+        <!-- 2. 설정 파일 편집 탭 (eula.txt / server.properties) -->
+        <div class="mb-2 d-flex justify-content-between align-items-center">
+            <span class="mcws-label mb-0">@(_activeTab == "eula" ? "eula.txt (서버 구동 전 eula=true 동의 필요)" : "server.properties (서버 환경 설정)")</span>
+            <div class="d-flex gap-2">
+                @if (_activeTab == "eula")
+                {
+                    <button class="btn-mcws-secondary btn-mcws-sm" @onclick="SetEulaTrue">eula=true 빠른 입력</button>
+                }
+                <button class="btn-mcws-primary btn-mcws-sm" @onclick="SaveConfigFileAsync">파일 저장</button>
+            </div>
+        </div>
+        <textarea class="mcws-input" rows="12" style="font-family: Consolas, monospace;" @bind="_configContent"></textarea>
+    }
+    else if (_activeTab == "addons")
+    {
+        <!-- 3. 월드 및 애드온 관리 탭 -->
+        @if (Instance.Status != ServerStatus.Offline)
+        {
+            <div class="mcws-alert mcws-alert-warning">
+                월드 교체/백업 및 애드온 설치/제거는 파일 잠금 방지를 위해 서버가 종료(Offline)된 상태에서만 가능합니다.
+            </div>
+        }
+
+        <div class="row g-3">
+            <!-- 월드 맵 관리 -->
+            <div class="col-md-6">
+                <div class="p-3" style="border: 1px solid var(--mcws-border); border-radius: var(--mcws-radius);">
+                    <h6 class="fw-bold mb-2">월드 맵 (.zip) 적용 및 백업</h6>
+                    <label class="mcws-label">보관소 월드 선택 후 슬롯에 덮어쓰기</label>
+                    <div class="d-flex gap-2 mb-3">
+                        <select class="mcws-select" @bind="_selectedWorldAddonId">
+                            <option value="0">-- 월드 맵 선택 --</option>
+                            @foreach (var w in _storageAddons.Where(a => a.Type == AddonType.World))
+                            {
+                                <option value="@w.Id">@w.FileName</option>
+                            }
+                        </select>
+                        <button class="btn-mcws-primary btn-mcws-sm" style="min-width: 80px;"
+                                @onclick="() => HandleInstallAddonAsync(_selectedWorldAddonId)">적용</button>
+                    </div>
+
+                    <label class="mcws-label">현재 슬롯 월드를 보관소로 백업 (mcws_addons.json 포함)</label>
+                    <div class="d-flex gap-2 mb-2">
+                        <input class="mcws-input" placeholder="백업 파일명 (비우면 자동 생성)" @bind="_backupWorldName" />
+                        <button class="btn-mcws-secondary btn-mcws-sm" style="min-width: 80px;" @onclick="HandleExportWorldAsync">백업</button>
+                    </div>
+
+                    <button class="btn-mcws-danger btn-mcws-sm w-100 mt-2"
+                            @onclick='() => HandleRemoveAddonAsync("world", AddonType.World)'>
+                        현재 슬롯 월드 폴더(world) 초기화 삭제
+                    </button>
+                </div>
+            </div>
+
+            <!-- 플러그인 / 모드 관리 -->
+            <div class="col-md-6">
+                <div class="p-3" style="border: 1px solid var(--mcws-border); border-radius: var(--mcws-radius);">
+                    <h6 class="fw-bold mb-2">플러그인 / 모드 설치 현황</h6>
+                    <div class="d-flex gap-2 mb-3">
+                        <select class="mcws-select" @bind="_selectedJarAddonId">
+                            <option value="0">-- 보관소 플러그인/모드 선택 --</option>
+                            @foreach (var a in GetCompatibleStorageAddons())
+                            {
+                                <option value="@a.Id">[@a.Type] @a.FileName</option>
+                            }
+                        </select>
+                        <button class="btn-mcws-primary btn-mcws-sm" style="min-width: 80px;"
+                                @onclick="() => HandleInstallAddonAsync(_selectedJarAddonId)">설치</button>
+                    </div>
+
+                    <div class="small fw-bold mb-1">설치된 플러그인 (@_installedPlugins.Count)</div>
+                    @foreach (var p in _installedPlugins)
+                    {
+                        <div class="d-flex justify-content-between align-items-center py-1 border-bottom" style="border-color: var(--mcws-border) !important;">
+                            <span class="small">[Plugin] @p</span>
+                            <button class="btn-mcws-danger btn-mcws-sm" @onclick="() => HandleRemoveAddonAsync(p, AddonType.Plugin)">제거</button>
+                        </div>
+                    }
+
+                    <div class="small fw-bold mt-2 mb-1">설치된 모드 (@_installedMods.Count)</div>
+                    @foreach (var m in _installedMods)
+                    {
+                        <div class="d-flex justify-content-between align-items-center py-1 border-bottom" style="border-color: var(--mcws-border) !important;">
+                            <span class="small">[Mod] @m</span>
+                            <button class="btn-mcws-danger btn-mcws-sm" @onclick="() => HandleRemoveAddonAsync(m, AddonType.Mod)">제거</button>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ServerInstance Instance { get; set; } = default!;
+    [Parameter, EditorRequired] public IReadOnlyList<ConsoleLogLine> Logs { get; set; } = Array.Empty<ConsoleLogLine>();
+
+    private string _activeTab = "console";
+    private string _commandInput = string.Empty;
+    private string _configContent = string.Empty;
+    private string _backupWorldName = string.Empty;
+    private int _selectedWorldAddonId;
+    private int _selectedJarAddonId;
+    private ResultCode? _resultCode;
+    private bool _isError;
+
+    private List<AddonFile> _storageAddons = new();
+    private List<string> _installedPlugins = new();
+    private List<string> _installedMods = new();
+    private int _loadedInstanceId;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedInstanceId != Instance.Id)
+        {
+            _loadedInstanceId = Instance.Id;
+            _resultCode = null;
+            if (_activeTab == "eula")
+                _configContent = await StorageService.ReadConfigFileAsync(Instance.WorkingDirectory, "eula.txt");
+            else if (_activeTab == "props")
+                _configContent = await StorageService.ReadConfigFileAsync(Instance.WorkingDirectory, "server.properties");
+            else if (_activeTab == "addons")
+                await LoadAddonStateAsync();
+        }
+        else if (_activeTab == "addons")
+        {
+            await LoadAddonStateAsync();
+        }
+    }
+
+    private async Task SwitchTabAsync(string tab)
+    {
+        _activeTab = tab;
+        _resultCode = null;
+
+        if (tab == "eula")
+            _configContent = await StorageService.ReadConfigFileAsync(Instance.WorkingDirectory, "eula.txt");
+        else if (tab == "props")
+            _configContent = await StorageService.ReadConfigFileAsync(Instance.WorkingDirectory, "server.properties");
+        else if (tab == "addons")
+            await LoadAddonStateAsync();
+    }
+
+    private async Task LoadAddonStateAsync()
+    {
+        _storageAddons = await AddonService.GetAddonFilesAsync();
+        _installedPlugins = StorageService.GetInstalledAddons(Instance.WorkingDirectory, AddonType.Plugin);
+        _installedMods = StorageService.GetInstalledAddons(Instance.WorkingDirectory, AddonType.Mod);
+    }
+
+    private IEnumerable<AddonFile> GetCompatibleStorageAddons() => Instance.LoaderType switch
+    {
+        ServerLoaderType.PluginOnly => _storageAddons.Where(a => a.Type == AddonType.Plugin),
+        ServerLoaderType.ModOnly => _storageAddons.Where(a => a.Type == AddonType.Mod),
+        _ => _storageAddons.Where(a => a.Type == AddonType.Plugin || a.Type == AddonType.Mod)
+    };
+
+    private async Task SendCommandAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_commandInput)) return;
+        string cmd = _commandInput.Trim();
+        _commandInput = string.Empty;
+        await InstanceManager.SendCommandAsync(Instance.Id, cmd);
+    }
+
+    private async Task HandleKeyDownAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await SendCommandAsync();
+    }
+
+    private void SetEulaTrue() => _configContent = "eula=true\n";
+
+    private async Task SaveConfigFileAsync()
+    {
+        if (AuthState.CurrentUser == null) return;
+        string fileName = _activeTab == "eula" ? "eula.txt" : "server.properties";
+        var (success, code) = await InstanceManager.SaveServerConfigAsync(
+            Instance.Id, fileName, _configContent, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+    }
+
+    private async Task HandleInstallAddonAsync(int addonId)
+    {
+        if (addonId <= 0 || AuthState.CurrentUser == null) return;
+        var (success, code) = await AddonService.InstallAddonToSlotAsync(Instance.Id, addonId, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+        await LoadAddonStateAsync();
+    }
+
+    private async Task HandleRemoveAddonAsync(string fileName, AddonType type)
+    {
+        if (AuthState.CurrentUser == null) return;
+        var (success, code) = await AddonService.RemoveAddonFromSlotAsync(Instance.Id, fileName, type, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+        await LoadAddonStateAsync();
+    }
+
+    private async Task HandleExportWorldAsync()
+    {
+        if (AuthState.CurrentUser == null) return;
+        var (success, code) = await AddonService.ExportWorldToAddonAsync(Instance.Id, _backupWorldName, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+        _backupWorldName = string.Empty;
+        await LoadAddonStateAsync();
+    }
+}

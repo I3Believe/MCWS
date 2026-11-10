@@ -1,6 +1,6 @@
-namespace MCWS.Models;
+ namespace MCWS_v2.Models;
 
-public enum UserRole
+ public enum UserRole
 {
     Master,
     Admin,

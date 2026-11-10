@@ -4,6 +4,9 @@
     <TargetFramework>net9.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <BlazorDisableThrowNavigationException>true</BlazorDisableThrowNavigationException>
+    <NoWarn>NU1903</NoWarn>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**;publish_linux\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

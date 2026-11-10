@@ -1,169 +1,232 @@
 @page "/admin"
-@implements IDisposable
-@inject AppDbContext Db
-@inject AuthService Auth
+@inject AuthService AuthService
 @inject AuthStateService AuthState
 
-<PageTitle>계정 및 감사 로그 - MCWS</PageTitle>
+<PageTitle>MCWS v2 - 관리자 센터</PageTitle>
 
-@if (!AuthState.IsLoggedIn)
+@if (!AuthState.IsAdminOrMaster || AuthState.CurrentUser == null)
 {
-    <div class="alert alert-warning bg-dark border-warning text-warning">
-        로그인이 필요합니다. <a href="/login" class="text-warning fw-bold">로그인 페이지로 이동</a>
-    </div>
-}
-else if (AuthState.CurrentUser!.Role == UserRole.Operator)
-{
-    <div class="alert alert-danger bg-dark border-danger text-danger">
-        이 페이지는 Master 또는 Admin 권한이 있어야 접근할 수 있습니다.
+    <div class="mcws-alert mcws-alert-danger mt-4">
+        관리자(Master / Admin)만 접근할 수 있는 페이지입니다.
     </div>
 }
 else
 {
-    <div class="container-fluid py-3">
-        <h3 class="fw-bold mb-4" style="color: #00d26a;">계정 관리 및 감사 로그 (Audit Log)</h3>
+    <div class="py-3">
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+            <h4 class="fw-bold mb-0" style="color: var(--mcws-primary);">관리자 센터</h4>
+            <div class="d-flex flex-wrap gap-2">
+                <button class="@(_activeSection == "all" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                        @onclick='() => _activeSection = "all"'>
+                    전체 보기
+                </button>
+                <button class="@(_activeSection == "users" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                        @onclick='() => _activeSection = "users"'>
+                    계정 및 가입 관리 (@(_pendingUsers.Count > 0 ? $"대기 {_pendingUsers.Count} / " : "")멤버 @_approvedUsers.Count)
+                </button>
+                <button class="@(_activeSection == "logs" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                        @onclick='() => _activeSection = "logs"'>
+                    시스템 감사 로그 (@_auditLogs.Count)
+                </button>
+            </div>
+        </div>
 
-        @if (!string.IsNullOrEmpty(_message))
+        @if (_resultCode != null)
         {
-            <div class="alert @(_isError ? "alert-danger border-danger text-danger" : "alert-info border-info text-info") bg-dark py-2">@_message</div>
+            <div class="mcws-alert @(_isError ? "mcws-alert-danger" : "mcws-alert-success")">
+                @_resultCode.Value.ToMessage()
+            </div>
         }
 
-        <div class="row g-4 mb-4">
-            <!-- 1. 가입 승인 대기 목록 -->
-            <div class="col-md-5">
-                <div class="card border-secondary shadow-sm h-100" style="background-color: #1a1a1e; color: #e1e1e6;">
-                    <div class="card-header bg-warning text-dark fw-bold">
-                        가입 승인 대기 목록 (@_pendingUsers.Count)
-                    </div>
-                    <div class="card-body">
+        <div class="row g-4">
+            @if (_activeSection == "all" || _activeSection == "users")
+            {
+                <!-- 1. 가입 승인 대기 목록 -->
+                <div class="col-lg-6">
+                    <div class="mcws-card h-100">
+                        <div class="mcws-card-header">
+                            <h5 class="mcws-card-title">가입 승인 대기 (@_pendingUsers.Count)</h5>
+                        </div>
+
                         @if (_pendingUsers.Count == 0)
                         {
-                            <p class="text-secondary mb-0">현재 승인 대기 중인 계정이 없습니다.</p>
+                            <div class="small py-3 text-center" style="color: var(--mcws-text-secondary);">
+                                현재 대기 중인 가입 신청이 없습니다.
+                            </div>
                         }
                         else
                         {
-                            <table class="table table-dark table-sm align-middle">
+                            <div class="mcws-table-container">
+                                <table class="mcws-table">
+                                    <thead>
+                                        <tr>
+                                            <th>아이디</th>
+                                            <th>신청일</th>
+                                            <th class="text-end">처리</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        @foreach (var u in _pendingUsers)
+                                        {
+                                            <tr>
+                                                <td class="fw-bold">@u.Username</td>
+                                                <td class="small">@u.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                                <td class="text-end">
+                                                    <button class="btn-mcws-primary btn-mcws-sm me-1"
+                                                            @onclick="() => HandleApprovalAsync(u.Id, true)">승인</button>
+                                                    <button class="btn-mcws-danger btn-mcws-sm"
+                                                            @onclick="() => HandleApprovalAsync(u.Id, false)">거절</button>
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            </div>
+                        }
+                    </div>
+                </div>
+
+                <!-- 2. 승인된 계정 및 권한 관리 -->
+                <div class="col-lg-6">
+                    <div class="mcws-card h-100">
+                        <div class="mcws-card-header">
+                            <h5 class="mcws-card-title">등록된 멤버 (@_approvedUsers.Count)</h5>
+                        </div>
+
+                        <div class="mcws-table-container">
+                            <table class="mcws-table">
                                 <thead>
                                     <tr>
                                         <th>아이디</th>
-                                        <th>요청 시각</th>
-                                        <th class="text-end">처리</th>
+                                        <th>권한</th>
+                                        <th>승인자</th>
+                                        <th class="text-end">Master 제어</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    @foreach (var u in _pendingUsers)
+                                    @foreach (var u in _approvedUsers)
                                     {
                                         <tr>
                                             <td class="fw-bold">@u.Username</td>
-                                            <td class="small text-secondary">@u.CreatedAt.ToLocalTime().ToString("MM-dd HH:mm")</td>
+                                            <td>
+                                                <span class="mcws-badge @(u.Role == UserRole.Master ? "badge-master" : u.Role == UserRole.Admin ? "badge-admin" : "badge-offline")">
+                                                    @u.Role
+                                                </span>
+                                            </td>
+                                            <td class="small">@(u.ApprovedBy ?? "-")</td>
                                             <td class="text-end">
-                                                <button class="btn btn-sm btn-success me-1" @onclick="() => HandleApproval(u.Id, true)">승인</button>
-                                                <button class="btn btn-sm btn-outline-danger" @onclick="() => HandleApproval(u.Id, false)">거절(삭제)</button>
+                                                @if (AuthState.IsMaster && u.Role != UserRole.Master)
+                                                {
+                                                    var nextRole = u.Role == UserRole.Admin ? UserRole.Operator : UserRole.Admin;
+                                                    <button class="btn-mcws-secondary btn-mcws-sm me-1"
+                                                            @onclick="() => HandleChangeRoleAsync(u.Id, nextRole)">
+                                                        @(u.Role == UserRole.Admin ? "일반 강등" : "Admin 임명")
+                                                    </button>
+                                                    <button class="btn-mcws-danger btn-mcws-sm"
+                                                            @onclick="() => HandleDeleteUserAsync(u.Id)">삭제</button>
+                                                }
                                             </td>
                                         </tr>
                                     }
                                 </tbody>
                             </table>
-                        }
+                        </div>
                     </div>
                 </div>
-            </div>
+            }
 
-            <!-- 2. 승인된 전체 회원 관리 -->
-            <div class="col-md-7">
-                <div class="card border-secondary shadow-sm h-100" style="background-color: #1a1a1e; color: #e1e1e6;">
-                    <div class="card-header bg-dark border-secondary text-white fw-bold">
-                        등록된 운영진 목록 (@_approvedUsers.Count)
-                    </div>
-                    <div class="card-body">
-                        <table class="table table-dark table-sm align-middle">
-                            <thead>
-                                <tr>
-                                    <th>아이디</th>
-                                    <th>등급</th>
-                                    <th>승인자</th>
-                                    <th class="text-end">Master 전용 관리</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                @foreach (var u in _approvedUsers)
-                                {
+            @if (_activeSection == "all" || _activeSection == "logs")
+            {
+                var filteredLogs = GetFilteredAuditLogs().ToList();
+
+                <!-- 3. 최근 감사 로그 (작업 카테고리별 분류 및 필터링) -->
+                <div class="col-12">
+                    <div class="mcws-card">
+                        <div class="mcws-card-header">
+                            <h5 class="mcws-card-title">시스템 감사 로그 (표시: @filteredLogs.Count / 전체: @_auditLogs.Count)</h5>
+                            <button class="btn-mcws-secondary btn-mcws-sm" @onclick="HandleManualRefreshAsync" disabled="@_isRefreshing">
+                                <span class="mcws-spinner @(_isRefreshing ? "mcws-spinner-spin" : "")"></span>새로고침
+                            </button>
+                        </div>
+
+                        <!-- 작업 분류 탭 -->
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            <button class="@(_logCategory == "all" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                                    @onclick='() => SetLogCategory("all")'>
+                                전체 작업 (@_auditLogs.Count)
+                            </button>
+                            <button class="@(_logCategory == "server" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                                    @onclick='() => SetLogCategory("server")'>
+                                서버 / 슬롯 제어 (@CountCategory("server"))
+                            </button>
+                            <button class="@(_logCategory == "config" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                                    @onclick='() => SetLogCategory("config")'>
+                                환경 설정 (@CountCategory("config"))
+                            </button>
+                            <button class="@(_logCategory == "addon" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                                    @onclick='() => SetLogCategory("addon")'>
+                                보관소 / 월드 / 애드온 (@CountCategory("addon"))
+                            </button>
+                            <button class="@(_logCategory == "auth" ? "btn-mcws-primary" : "btn-mcws-secondary") btn-mcws-sm"
+                                    @onclick='() => SetLogCategory("auth")'>
+                                계정 / 권한 (@CountCategory("auth"))
+                            </button>
+                        </div>
+
+                        <!-- 세부 작업 선택 및 검색 필터 -->
+                        <div class="row g-2 mb-3">
+                            <div class="col-md-4">
+                                <select class="mcws-select" @bind="_selectedActionFilter">
+                                    <option value="">-- 세부 작업 전체 보기 --</option>
+                                    @foreach (var act in GetAvailableActions())
+                                    {
+                                        <option value="@act">@act</option>
+                                    }
+                                </select>
+                            </div>
+                            <div class="col-md-8">
+                                <input class="mcws-input" placeholder="수행자 아이디, 작업명 또는 대상(슬롯/파일명) 검색..."
+                                       @bind="_searchKeyword" @bind:event="oninput" />
+                            </div>
+                        </div>
+
+                        <div class="mcws-table-container" style="max-height: 420px; overflow-y: auto;">
+                            <table class="mcws-table">
+                                <thead>
                                     <tr>
-                                        <td class="fw-bold">@u.Username</td>
-                                        <td>
-                                            <span class="badge @(u.Role == UserRole.Master ? "bg-danger" : u.Role == UserRole.Admin ? "bg-primary" : "bg-secondary")">
-                                                @u.Role
-                                            </span>
-                                        </td>
-                                        <td class="small text-secondary">@(u.ApprovedBy ?? "-")</td>
-                                        <td class="text-end">
-                                            @if (AuthState.IsMaster && u.Role != UserRole.Master)
-                                            {
-                                                @if (u.Role == UserRole.Operator)
-                                                {
-                                                    <button class="btn btn-sm btn-outline-info me-1"
-                                                            @onclick="() => HandleRoleChange(u.Id, UserRole.Admin)">
-                                                        Admin 승격
-                                                    </button>
-                                                }
-                                                else if (u.Role == UserRole.Admin)
-                                                {
-                                                    <button class="btn btn-sm btn-outline-secondary me-1"
-                                                            @onclick="() => HandleRoleChange(u.Id, UserRole.Operator)">
-                                                        Operator 강등
-                                                    </button>
-                                                }
-
-                                                <button class="btn btn-sm btn-danger"
-                                                        @onclick="() => HandleDeleteUser(u.Id)">
-                                                    계정 삭제
-                                                </button>
-                                            }
-                                            else
-                                            {
-                                                <span class="text-secondary small">-</span>
-                                            }
-                                        </td>
+                                        <th>시각</th>
+                                        <th>수행자</th>
+                                        <th>작업</th>
+                                        <th>대상</th>
                                     </tr>
-                                }
-                            </tbody>
-                        </table>
+                                </thead>
+                                <tbody>
+                                    @if (filteredLogs.Count == 0)
+                                    {
+                                        <tr>
+                                            <td colspan="4" class="text-center small py-3" style="color: var(--mcws-text-secondary);">
+                                                선택한 조건에 해당하는 작업 로그가 없습니다.
+                                            </td>
+                                        </tr>
+                                    }
+                                    else
+                                    {
+                                        @foreach (var log in filteredLogs)
+                                        {
+                                            <tr>
+                                                <td class="small">@log.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
+                                                <td class="fw-bold">@log.Username</td>
+                                                <td>@log.Action</td>
+                                                <td class="small" style="color: var(--mcws-text-secondary);">@log.Target</td>
+                                            </tr>
+                                        }
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- 3. 서버 행위 감사 로그 (AuditLogs) -->
-        <div class="card border-secondary shadow-sm" style="background-color: #1a1a1e; color: #e1e1e6;">
-            <div class="card-header bg-dark border-secondary text-white d-flex justify-content-between align-items-center">
-                <span class="fw-bold" style="color: #00d26a;">서버 행위 감사 로그 (최근 100건)</span>
-                <button class="btn btn-sm btn-outline-light" @onclick="LoadDataAsync">새로고침</button>
-            </div>
-            <div class="card-body p-0">
-                <div style="max-height: 360px; overflow-y: auto;">
-                    <table class="table table-dark table-striped table-hover table-sm mb-0">
-                        <thead class="sticky-top">
-                            <tr>
-                                <th class="ps-3">시각</th>
-                                <th>수행자 (Username)</th>
-                                <th>행위 (Action)</th>
-                                <th>대상 및 상세 (Target)</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            @foreach (var log in _auditLogs)
-                            {
-                                <tr>
-                                    <td class="ps-3 small text-secondary">@log.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</td>
-                                    <td class="fw-bold">@log.Username</td>
-                                    <td><span class="badge bg-secondary">@log.Action</span></td>
-                                    <td>@log.Target</td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+            }
         </div>
     </div>
 }
@@ -172,68 +235,113 @@ else
     private List<User> _pendingUsers = new();
     private List<User> _approvedUsers = new();
     private List<AuditLog> _auditLogs = new();
-    private string _message = "";
-    private bool _isError = false;
+    private ResultCode? _resultCode;
+    private bool _isError;
+    private bool _isRefreshing;
 
-    protected override async Task OnInitializedAsync()
-    {
-        AuthState.OnChange += HandleAuthStateChanged;
-        await LoadDataAsync();
-    }
+    private string _activeSection = "all";
+    private string _logCategory = "all";
+    private string _selectedActionFilter = string.Empty;
+    private string _searchKeyword = string.Empty;
 
-    private void HandleAuthStateChanged()
-    {
-        InvokeAsync(async () =>
-        {
-            await LoadDataAsync();
-            StateHasChanged();
-        });
-    }
+    protected override async Task OnInitializedAsync() => await LoadDataAsync();
 
     private async Task LoadDataAsync()
     {
-        var allUsers = await Db.Users.OrderBy(u => u.Id).ToListAsync();
-        _pendingUsers = allUsers.Where(u => !u.IsApproved).ToList();
-        _approvedUsers = allUsers.Where(u => u.IsApproved).ToList();
-
-        _auditLogs = await Db.AuditLogs
-            .OrderByDescending(l => l.Timestamp)
-            .Take(100)
-            .ToListAsync();
+        (_pendingUsers, _approvedUsers) = await AuthService.GetUsersForAdminAsync();
+        _auditLogs = await AuthService.GetRecentAuditLogsAsync(200);
     }
 
-    private async Task HandleApproval(int targetUserId, bool approve)
+    private void SetLogCategory(string category)
+    {
+        _logCategory = category;
+        _selectedActionFilter = string.Empty;
+    }
+
+    private static string GetActionCategory(string action)
+    {
+        if (action.Contains("서버") || action.Contains("슬롯"))
+            return "server";
+        if (action.Contains("설정 파일"))
+            return "config";
+        if (action.Contains("버킷") || action.Contains("보관소") || action.Contains("애드온") || action.Contains("월드"))
+            return "addon";
+        if (action.Contains("가입") || action.Contains("계정") || action.Contains("권한"))
+            return "auth";
+        return "other";
+    }
+
+    private int CountCategory(string category) =>
+        _auditLogs.Count(x => GetActionCategory(x.Action) == category);
+
+    private IEnumerable<string> GetAvailableActions()
+    {
+        var query = _logCategory == "all"
+            ? _auditLogs
+            : _auditLogs.Where(x => GetActionCategory(x.Action) == _logCategory);
+
+        return query.Select(x => x.Action).Distinct().OrderBy(x => x);
+    }
+
+    private IEnumerable<AuditLog> GetFilteredAuditLogs()
+    {
+        IEnumerable<AuditLog> query = _auditLogs;
+
+        if (_logCategory != "all")
+            query = query.Where(x => GetActionCategory(x.Action) == _logCategory);
+
+        if (!string.IsNullOrWhiteSpace(_selectedActionFilter))
+            query = query.Where(x => x.Action == _selectedActionFilter);
+
+        if (!string.IsNullOrWhiteSpace(_searchKeyword))
+        {
+            string kw = _searchKeyword.Trim();
+            query = query.Where(x =>
+                x.Username.Contains(kw, StringComparison.OrdinalIgnoreCase) ||
+                x.Action.Contains(kw, StringComparison.OrdinalIgnoreCase) ||
+                x.Target.Contains(kw, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return query;
+    }
+
+    private async Task HandleManualRefreshAsync()
+    {
+        if (_isRefreshing) return;
+        _isRefreshing = true;
+        StateHasChanged();
+
+        var minSpinTask = Task.Delay(500);
+        await LoadDataAsync();
+        await minSpinTask;
+
+        _isRefreshing = false;
+    }
+
+    private async Task HandleApprovalAsync(int targetId, bool approve)
     {
         if (AuthState.CurrentUser == null) return;
-
-        var res = await Auth.ProcessApprovalAsync(targetUserId, approve, AuthState.CurrentUser);
-        _isError = !res.Success;
-        _message = res.Message;
+        var (success, code) = await AuthService.ProcessApprovalAsync(targetId, approve, AuthState.CurrentUser);
+        _isError = !success;
+        _resultCode = code;
         await LoadDataAsync();
     }
 
-    private async Task HandleRoleChange(int targetUserId, UserRole newRole)
+    private async Task HandleChangeRoleAsync(int targetId, UserRole newRole)
     {
         if (AuthState.CurrentUser == null) return;
-
-        var res = await Auth.ChangeUserRoleAsync(targetUserId, newRole, AuthState.CurrentUser);
-        _isError = !res.Success;
-        _message = res.Message;
+        var (success, code) = await AuthService.ChangeUserRoleAsync(targetId, newRole, AuthState.CurrentUser);
+        _isError = !success;
+        _resultCode = code;
         await LoadDataAsync();
     }
 
-    private async Task HandleDeleteUser(int targetUserId)
+    private async Task HandleDeleteUserAsync(int targetId)
     {
         if (AuthState.CurrentUser == null) return;
-
-        var res = await Auth.DeleteApprovedUserAsync(targetUserId, AuthState.CurrentUser);
-        _isError = !res.Success;
-        _message = res.Message;
+        var (success, code) = await AuthService.DeleteApprovedUserAsync(targetId, AuthState.CurrentUser);
+        _isError = !success;
+        _resultCode = code;
         await LoadDataAsync();
-    }
-
-    public void Dispose()
-    {
-        AuthState.OnChange -= HandleAuthStateChanged;
     }
 }

@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
-using MCWS.Models;
+using MCWS_v2.Models;
 
-namespace MCWS.Data;
+namespace MCWS_v2.Data;
 
 public class AppDbContext : DbContext
 {
@@ -14,7 +14,6 @@ public class AppDbContext : DbContext
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
     public DbSet<ServerInstance> ServerInstances => Set<ServerInstance>();
     public DbSet<ServerTemplate> ServerTemplates => Set<ServerTemplate>();
-    public DbSet<WorldMap> WorldMaps => Set<WorldMap>();
     public DbSet<AddonFile> AddonFiles => Set<AddonFile>();
 
     // 테이블 생성 시 지켜야 할 중복 방지 규칙(Unique Index) 설정

@@ -1,573 +1,297 @@
 @page "/storage"
-@implements IDisposable
-@inject AppDbContext Db
-@inject ServerInstanceManager InstanceManager
+@inject AddonService AddonService
 @inject AuthStateService AuthState
 
-<PageTitle>MCWS - 자료실</PageTitle>
+<PageTitle>MCWS v2 - 보관소 관리</PageTitle>
 
-<div class="container-fluid py-4">
-    <div class="mb-4 pb-2 border-bottom border-secondary">
-        <h3 class="fw-bold mb-1" style="color: #00d26a;">자료실 (버킷 / 맵 / 플러그인 / 모드)</h3>
-        <p class="text-secondary small mb-0">공용 파일을 업로드, 다운로드, 관리합니다. 슬롯 장착은 대시보드의 [플러그인 / 모드] 탭에서 합니다.</p>
+@if (!AuthState.IsLoggedIn || AuthState.CurrentUser == null)
+{
+    <div class="mcws-alert mcws-alert-warning mt-4">
+        로그인 후 이용할 수 있습니다.
     </div>
+}
+else
+{
+    <div class="py-3">
+        <h4 class="fw-bold mb-3" style="color: var(--mcws-primary);">공용 템플릿 및 애드온 보관소</h4>
 
-    @if (!AuthState.IsLoggedIn)
-    {
-        <div class="alert alert-warning bg-dark border-warning text-warning">
-            로그인이 필요한 페이지입니다. <a href="login" class="text-warning fw-bold">로그인 페이지로 이동</a>
-        </div>
-    }
-    else
-    {
-        @if (!string.IsNullOrEmpty(statusMessage))
+        @if (_resultCode != null)
         {
-            <div class="alert @(isError ? "alert-danger border-danger text-danger" : "alert-info border-info text-info") bg-dark mb-3">
-                @statusMessage
+            <div class="mcws-alert @(_isError ? "mcws-alert-danger" : "mcws-alert-success")">
+                @_resultCode.Value.ToMessage()
             </div>
         }
 
-        <div class="row g-4">
-            <!-- 1. 버킷(.jar) 보관소 -->
-            <div class="col-xl-6">
-                <div class="card border-secondary h-100" style="background-color: #1a1a1e;">
-                    <div class="card-header bg-dark border-secondary text-white fw-bold d-flex justify-content-between align-items-center">
-                        <span>버킷 (서버 실행기 .jar)</span>
-                        <span class="badge bg-success">/templates/jars/</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="p-3 mb-3 rounded border border-secondary" style="background-color: #121214;">
-                            <div class="mb-2">
-                                <InputFile class="form-control form-control-sm bg-dark border-secondary text-white"
-                                           OnChange="HandleJarSelected" accept=".jar" />
-                            </div>
-                            <div class="row g-2 mb-2">
-                                <div class="col-6">
-                                    <label class="form-label text-secondary small mb-1">Java 버전</label>
-                                    <select class="form-select form-select-sm bg-dark border-secondary text-white" @bind="selectedJavaVer">
-                                        <option value="25">Java 25 (MC 26.1 이상)</option>
-                                        <option value="21">Java 21 (MC 1.20.5 ~ 1.21.x)</option>
-                                        <option value="17">Java 17 (MC 1.17 ~ 1.20.4)</option>
-                                        <option value="8">Java 8 (MC 1.16.5 이하)</option>
-                                    </select>
-                                </div>
-                                <div class="col-6">
-                                    <label class="form-label text-secondary small mb-1">로더 종류</label>
-                                    <select class="form-select form-select-sm bg-dark border-secondary text-white" @bind="selectedLoaderType">
-                                        <option value="@ServerLoaderType.PluginOnly">플러그인 (Paper/Spigot)</option>
-                                        <option value="@ServerLoaderType.ModOnly">모드 (Forge/Fabric)</option>
-                                        <option value="@ServerLoaderType.Hybrid">하이브리드 (Mohist 등)</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <button class="btn btn-success btn-sm w-100 fw-bold"
-                                    @onclick="UploadJarAsync" disabled="@(jarFile == null || isUploading)">
-                                @(isUploading ? "업로드 중..." : "버킷 업로드")
-                            </button>
-                        </div>
+        <!-- 상단 탭 선택 (버킷 / 월드 / 플러그인 / 모드) -->
+        <div class="d-flex flex-wrap gap-2 mb-4">
+            <button class="@(_activeTab == "jars" ? "btn-mcws-primary" : "btn-mcws-secondary")"
+                    @onclick='() => SwitchTab("jars")'>
+                서버 버킷 (.jar) (@_templates.Count)
+            </button>
+            <button class="@(_activeTab == "world" ? "btn-mcws-primary" : "btn-mcws-secondary")"
+                    @onclick='() => SwitchTab("world")'>
+                월드 맵 (.zip) (@_addons.Count(a => a.Type == AddonType.World))
+            </button>
+            <button class="@(_activeTab == "plugin" ? "btn-mcws-primary" : "btn-mcws-secondary")"
+                    @onclick='() => SwitchTab("plugin")'>
+                플러그인 (.jar) (@_addons.Count(a => a.Type == AddonType.Plugin))
+            </button>
+            <button class="@(_activeTab == "mod" ? "btn-mcws-primary" : "btn-mcws-secondary")"
+                    @onclick='() => SwitchTab("mod")'>
+                모드 (.jar) (@_addons.Count(a => a.Type == AddonType.Mod))
+            </button>
+        </div>
 
-                        <h6 class="text-secondary small fw-bold mb-2">보관된 버킷 (@templates.Count)</h6>
-                        <ul class="list-group list-group-flush border border-secondary rounded">
-                            @if (templates.Count == 0)
-                            {
-                                <li class="list-group-item bg-dark text-secondary text-center small py-3">업로드된 버킷이 없습니다.</li>
-                            }
-                            @foreach (var t in templates)
-                            {
-                                <li class="list-group-item bg-dark text-white d-flex justify-content-between align-items-center py-2 border-secondary">
-                                    <div>
-                                        <div class="fw-bold"><code>@t.FileName</code></div>
-                                        <div class="text-secondary small">
-                                            <span class="badge @LoaderBadge(t.LoaderType) me-1">@LoaderLabel(t.LoaderType)</span>
-                                            Java @t.RecommendedJavaVersion | @FormatBytes(t.FileSizeBytes)
-                                        </div>
-                                    </div>
-                                    <div class="d-flex gap-1">
-                                        <a class="btn btn-outline-light btn-sm" href="@DownloadUrl("jars", t.FileName)" download target="_blank">다운로드</a>
-                                        <button class="btn btn-outline-danger btn-sm" @onclick="() => DeleteJarAsync(t)">삭제</button>
-                                    </div>
-                                </li>
-                            }
-                        </ul>
+        <!-- 1. 파일 업로드 카드 -->
+        <div class="mcws-card mb-4">
+            <div class="mcws-card-header">
+                <h5 class="mcws-card-title">새 파일 업로드 (@GetTabDisplayName())</h5>
+            </div>
+
+            <div class="row g-3 align-items-end">
+                <div class="@(_activeTab == "jars" ? "col-md-5" : "col-md-9")">
+                    <label class="mcws-label">파일 선택 @( _activeTab == "world" ? "(.zip)" : "(.jar)" ) — 동일 파일명 업로드 시 자동 갱신</label>
+                    <InputFile @key="_inputFileKey"
+                               OnChange="HandleFileSelected"
+                               accept="@(_activeTab == "world" ? ".zip" : ".jar")"
+                               class="mcws-input" />
+                </div>
+
+                @if (_activeTab == "jars")
+                {
+                    <div class="col-md-3">
+                        <label class="mcws-label">권장 Java 버전 (자동 감지됨)</label>
+                        <select class="mcws-select" @bind="_selectedJavaVersion">
+                            <option value="25">Java 25 (MC 26.1 이상)</option>
+                            <option value="21">Java 21 (MC 1.20.5 ~ 1.21.x)</option>
+                            <option value="17">Java 17 (MC 1.17 ~ 1.20.4)</option>
+                            <option value="8">Java 8 (MC 1.16.5 이하)</option>
+                        </select>
                     </div>
+                    <div class="col-md-2">
+                        <label class="mcws-label">로더 유형 (자동 감지됨)</label>
+                        <select class="mcws-select" @bind="_selectedLoaderType">
+                            <option value="@ServerLoaderType.PluginOnly">PluginOnly (Paper/Spigot)</option>
+                            <option value="@ServerLoaderType.ModOnly">ModOnly (Forge/Fabric)</option>
+                            <option value="@ServerLoaderType.Hybrid">Hybrid (Arclight/Mohist)</option>
+                        </select>
+                    </div>
+                }
+
+                <div class="@(_activeTab == "jars" ? "col-md-2" : "col-md-3")">
+                    <button class="btn-mcws-primary w-100"
+                            @onclick="HandleUploadSubmitAsync"
+                            disabled="@(_selectedFile == null || _isUploading)">
+                        @(_isUploading ? "업로드 중..." : "업로드")
+                    </button>
                 </div>
             </div>
 
-            <!-- 2. 월드 맵(.zip) 보관소 -->
-            <div class="col-xl-6">
-                <div class="card border-secondary h-100" style="background-color: #1a1a1e;">
-                    <div class="card-header bg-dark border-secondary text-white fw-bold d-flex justify-content-between align-items-center">
-                        <span>월드 맵 (.zip)</span>
-                        <span class="badge bg-info text-dark">/templates/maps/</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="p-3 mb-3 rounded border border-secondary" style="background-color: #121214;">
-                            <div class="mb-2">
-                                <InputFile class="form-control form-control-sm bg-dark border-secondary text-white"
-                                           OnChange="HandleMapSelected" accept=".zip" />
-                            </div>
-                            <div class="mb-2">
-                                <input type="text" class="form-control form-control-sm bg-dark border-secondary text-white"
-                                       @bind="customMapName" placeholder="저장할 파일 이름 (비우면 원본 이름)" />
-                            </div>
-                            <button class="btn btn-info btn-sm w-100 fw-bold"
-                                    @onclick="UploadMapAsync" disabled="@(mapFile == null || isUploading)">
-                                @(isUploading ? "업로드 중..." : "월드 맵 업로드")
-                            </button>
-                        </div>
-
-                        <h6 class="text-secondary small fw-bold mb-2">보관된 월드 맵 (@maps.Count)</h6>
-                        <ul class="list-group list-group-flush border border-secondary rounded">
-                            @if (maps.Count == 0)
-                            {
-                                <li class="list-group-item bg-dark text-secondary text-center small py-3">보관된 월드 맵이 없습니다.</li>
-                            }
-                            @foreach (var m in maps)
-                            {
-                                <li class="list-group-item bg-dark text-white py-2 border-secondary">
-                                    @if (renamingMapId == m.Id)
-                                    {
-                                        <div class="input-group input-group-sm">
-                                            <input type="text" class="form-control bg-black text-white border-info" @bind="newMapFileName" />
-                                            <button class="btn btn-info fw-bold" @onclick="() => RenameMapFileAsync(m)">변경</button>
-                                            <button class="btn btn-secondary" @onclick="() => renamingMapId = null">취소</button>
-                                        </div>
-                                    }
-                                    else
-                                    {
-                                        <div class="d-flex justify-content-between align-items-center">
-                                            <div>
-                                                <div class="fw-bold text-info"><code>@m.FileName</code></div>
-                                                <div class="text-secondary small">@FormatBytes(m.FileSizeBytes) | @m.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</div>
-                                            </div>
-                                            <div class="d-flex gap-1">
-                                                <a class="btn btn-outline-light btn-sm" href="@DownloadUrl("maps", m.FileName)" download target="_blank">다운로드</a>
-                                                <button class="btn btn-outline-info btn-sm" @onclick="() => StartRename(m)">이름 변경</button>
-                                                <button class="btn btn-outline-danger btn-sm" @onclick="() => DeleteMapAsync(m)">삭제</button>
-                                            </div>
-                                        </div>
-                                    }
-                                </li>
-                            }
-                        </ul>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 3. 플러그인 / 4. 모드 보관소 (같은 UI를 타입만 바꿔서 2번 그림) -->
-            @foreach (var addonType in new[] { AddonType.Plugin, AddonType.Mod })
+            @if (_selectedFile != null && !_isUploading)
             {
-                var currentType = addonType;
-                var isPlugin = currentType == AddonType.Plugin;
-                var list = addons.Where(a => a.Type == currentType).ToList();
+                <div class="small mt-2" style="color: var(--mcws-text-secondary);">
+                    선택된 파일: <strong>@_selectedFile.Name</strong> (@FormatSizeMb(_selectedFile.Size) MB)
+                    @if (_activeTab == "jars")
+                    {
+                        <span> — 감지된 설정: <strong>Java @_selectedJavaVersion / @_selectedLoaderType</strong> (우측의 [업로드] 버튼을 누르면 저장됩니다)</span>
+                    }
+                    else
+                    {
+                        <span> — 우측의 [업로드] 버튼을 누르면 보관소에 저장됩니다.</span>
+                    }
+                </div>
+            }
 
-                <div class="col-xl-6">
-                    <div class="card border-secondary h-100" style="background-color: #1a1a1e;">
-                        <div class="card-header bg-dark border-secondary text-white fw-bold d-flex justify-content-between align-items-center">
-                            <span>@(isPlugin ? "플러그인 (.jar)" : "모드 (.jar)")</span>
-                            <span class="badge @(isPlugin ? "bg-warning text-dark" : "bg-primary")">/templates/@(isPlugin ? "plugins" : "mods")/</span>
-                        </div>
-                        <div class="card-body">
-                            <div class="p-3 mb-3 rounded border border-secondary" style="background-color: #121214;">
-                                <div class="mb-2">
-                                    <InputFile class="form-control form-control-sm bg-dark border-secondary text-white"
-                                               OnChange="e => HandleAddonSelected(e, currentType)" accept=".jar" />
-                                </div>
-                                <button class="btn @(isPlugin ? "btn-warning" : "btn-primary") btn-sm w-100 fw-bold"
-                                        @onclick="() => UploadAddonAsync(currentType)"
-                                        disabled="@(GetPendingAddon(currentType) == null || isUploading)">
-                                    @(isUploading ? "업로드 중..." : (isPlugin ? "플러그인 업로드" : "모드 업로드"))
-                                </button>
-                            </div>
-
-                            <h6 class="text-secondary small fw-bold mb-2">보관된 @(isPlugin ? "플러그인" : "모드") (@list.Count)</h6>
-                            <ul class="list-group list-group-flush border border-secondary rounded">
-                                @if (list.Count == 0)
-                                {
-                                    <li class="list-group-item bg-dark text-secondary text-center small py-3">업로드된 파일이 없습니다.</li>
-                                }
-                                @foreach (var a in list)
-                                {
-                                    <li class="list-group-item bg-dark text-white d-flex justify-content-between align-items-center py-2 border-secondary">
-                                        <div>
-                                            <div class="fw-bold"><code>@a.FileName</code></div>
-                                            <div class="text-secondary small">@FormatBytes(a.FileSizeBytes) | @a.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</div>
-                                        </div>
-                                        <div class="d-flex gap-1">
-                                            <a class="btn btn-outline-light btn-sm" href="@DownloadUrl(isPlugin ? "plugins" : "mods", a.FileName)" download target="_blank">다운로드</a>
-                                            <button class="btn btn-outline-danger btn-sm" @onclick="() => DeleteAddonAsync(a)">삭제</button>
-                                        </div>
-                                    </li>
-                                }
-                            </ul>
-                        </div>
-                    </div>
+            @if (_isUploading)
+            {
+                <div class="small mt-2" style="color: var(--mcws-primary);">
+                    파일을 디스크에 안전하게 기록하는 중입니다...
                 </div>
             }
         </div>
-    }
-</div>
+
+        <!-- 2. 보관소 파일 목록 테이블 (단일 통합 테이블) -->
+        <div class="mcws-card">
+            <div class="mcws-card-header">
+                <h5 class="mcws-card-title">@GetTabDisplayName() 목록</h5>
+            </div>
+
+            <div class="mcws-table-container">
+                <table class="mcws-table">
+                    <thead>
+                        <tr>
+                            <th>파일명</th>
+                            @if (_activeTab == "jars")
+                            {
+                                <th>권장 Java</th>
+                                <th>로더 유형</th>
+                            }
+                            <th>크기 (MB)</th>
+                            <th>업로드 일시</th>
+                            <th class="text-end">다운로드 / 삭제</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (_activeTab == "jars")
+                        {
+                            @foreach (var t in _templates)
+                            {
+                                <tr>
+                                    <td class="fw-bold">@t.FileName</td>
+                                    <td><span class="mcws-badge badge-offline">Java @t.RecommendedJavaVersion</span></td>
+                                    <td><span class="mcws-badge badge-running">@t.LoaderType</span></td>
+                                    <td>@FormatSizeMb(t.FileSizeBytes) MB</td>
+                                    <td class="small">@t.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                    <td class="text-end">
+                                        <a href="/download/jars/@t.FileName" class="btn-mcws-secondary btn-mcws-sm me-1" style="text-decoration: none;" download>다운로드</a>
+                                        <button class="btn-mcws-danger btn-mcws-sm" @onclick="() => HandleDeleteTemplateAsync(t.Id)">삭제</button>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                        else
+                        {
+                            var currentType = GetCurrentAddonType();
+                            var categoryUrl = currentType == AddonType.World ? "maps" : currentType == AddonType.Plugin ? "plugins" : "mods";
+                            @foreach (var a in _addons.Where(x => x.Type == currentType))
+                            {
+                                <tr>
+                                    <td class="fw-bold">@a.FileName</td>
+                                    <td>@FormatSizeMb(a.FileSizeBytes) MB</td>
+                                    <td class="small">@a.UploadedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                    <td class="text-end">
+                                        <a href="/download/@categoryUrl/@a.FileName" class="btn-mcws-secondary btn-mcws-sm me-1" style="text-decoration: none;" download>다운로드</a>
+                                        <button class="btn-mcws-danger btn-mcws-sm" @onclick="() => HandleDeleteAddonAsync(a.Id)">삭제</button>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+}
 
 @code {
-    private const long MaxUploadBytes = 500L * 1024 * 1024; // 500MB
+    private const long MaxUploadSize = 1024L * 1024L * 500L; // 최대 500MB
+    private string _activeTab = "jars";
+    private int _selectedJavaVersion = 21;
+    private ServerLoaderType _selectedLoaderType = ServerLoaderType.PluginOnly;
+    private IBrowserFile? _selectedFile;
+    private int _inputFileKey;
+    private bool _isUploading;
+    private ResultCode? _resultCode;
+    private bool _isError;
 
-    private List<ServerTemplate> templates = new();
-    private List<WorldMap> maps = new();
-    private List<AddonFile> addons = new();
+    private List<ServerTemplate> _templates = new();
+    private List<AddonFile> _addons = new();
 
-    private string statusMessage = string.Empty;
-    private bool isError = false;
-    private bool isUploading = false;
+    protected override async Task OnInitializedAsync() => await LoadStorageAsync();
 
-    // 버킷 업로드 상태
-    private IBrowserFile? jarFile;
-    private int selectedJavaVer = 21;
-    private ServerLoaderType selectedLoaderType = ServerLoaderType.PluginOnly;
-
-    // 맵 업로드 상태
-    private IBrowserFile? mapFile;
-    private string customMapName = string.Empty;
-    private int? renamingMapId = null;
-    private string newMapFileName = string.Empty;
-
-    // 플러그인/모드 업로드 대기 파일 (타입별로 따로 보관)
-    private IBrowserFile? pendingPlugin;
-    private IBrowserFile? pendingMod;
-
-    protected override async Task OnInitializedAsync()
+    private async Task LoadStorageAsync()
     {
-        AuthState.OnChange += HandleAuthStateChanged;
-        await LoadAllAsync();
+        _templates = await AddonService.GetServerTemplatesAsync();
+        _addons = await AddonService.GetAddonFilesAsync();
     }
 
-    private void HandleAuthStateChanged()
+    private void SwitchTab(string tab)
     {
-        InvokeAsync(async () =>
-        {
-            await LoadAllAsync();
-            StateHasChanged();
-        });
+        _activeTab = tab;
+        _selectedFile = null;
+        _inputFileKey++;
+        _resultCode = null;
     }
 
-    public void Dispose()
+    private AddonType GetCurrentAddonType() => _activeTab switch
     {
-        AuthState.OnChange -= HandleAuthStateChanged;
-    }
-
-    private async Task LoadAllAsync()
-    {
-        templates = await Db.ServerTemplates.OrderByDescending(t => t.UploadedAt).ToListAsync();
-        maps = await Db.WorldMaps.OrderByDescending(m => m.UploadedAt).ToListAsync();
-        addons = await Db.AddonFiles.OrderBy(a => a.FileName).ToListAsync();
-    }
-
-    // ---------- 공통 유틸 ----------
-
-    // 다운로드 URL 생성 (파일명에 공백/한글이 있어도 깨지지 않게 인코딩)
-    private string DownloadUrl(string category, string fileName)
-        => $"/download/{category}/{Uri.EscapeDataString(fileName)}";
-
-    // 브라우저 파일을 서버 디스크로 스트리밍 저장 (메모리에 통째로 올리지 않음)
-    private async Task SaveToDiskAsync(IBrowserFile file, string fullPath)
-    {
-        await using var stream = file.OpenReadStream(maxAllowedSize: MaxUploadBytes);
-        await using var fs = new FileStream(fullPath, FileMode.Create);
-        await stream.CopyToAsync(fs);
-    }
-
-    private void AddAudit(string action, string target)
-    {
-        Db.AuditLogs.Add(new AuditLog
-        {
-            Username = AuthState.CurrentUser?.Username ?? "Unknown",
-            Action = action,
-            Target = target
-        });
-    }
-
-    private void SetStatus(string message, bool error = false)
-    {
-        statusMessage = message;
-        isError = error;
-    }
-
-    private string LoaderLabel(ServerLoaderType type) => type switch
-    {
-        ServerLoaderType.ModOnly => "모드",
-        ServerLoaderType.Hybrid => "하이브리드",
-        _ => "플러그인"
+        "world" => AddonType.World,
+        "plugin" => AddonType.Plugin,
+        _ => AddonType.Mod
     };
 
-    private string LoaderBadge(ServerLoaderType type) => type switch
+    private string GetTabDisplayName() => _activeTab switch
     {
-        ServerLoaderType.ModOnly => "bg-primary",
-        ServerLoaderType.Hybrid => "bg-danger",
-        _ => "bg-warning text-dark"
+        "jars" => "서버 버킷 (.jar)",
+        "world" => "월드 맵 (.zip)",
+        "plugin" => "플러그인 (.jar)",
+        _ => "모드 (.jar)"
     };
 
-    private string FormatBytes(long bytes)
+    private double FormatSizeMb(long bytes) => Math.Round(bytes / (1024.0 * 1024.0), 2);
+
+    private void HandleFileSelected(InputFileChangeEventArgs e)
     {
-        if (bytes >= 1024 * 1024)
-            return $"{bytes / (1024.0 * 1024.0):F1} MB";
-        return $"{bytes / 1024.0:F1} KB";
+        _selectedFile = e.File;
+        _resultCode = null;
+
+        if (_activeTab == "jars" && _selectedFile != null)
+        {
+            string lower = _selectedFile.Name.ToLowerInvariant();
+
+            // 파일명 기반 권장 Java 버전 자동 추론
+            if (lower.Contains("1.7") || lower.Contains("1.8") || lower.Contains("1.12") || lower.Contains("1.16"))
+                _selectedJavaVersion = 8;
+            else if (lower.Contains("1.17") || lower.Contains("1.18") || lower.Contains("1.19") || lower.Contains("1.20.1") || lower.Contains("1.20.2") || lower.Contains("1.20.4"))
+                _selectedJavaVersion = 17;
+            else if (lower.Contains("1.20") || lower.Contains("1.21"))
+                _selectedJavaVersion = 21;
+            else
+                _selectedJavaVersion = 25;
+
+            // 파일명 기반 로더 유형 자동 추론
+            if (lower.Contains("mohist") || lower.Contains("arclight") || lower.Contains("magma") || lower.Contains("catserver"))
+                _selectedLoaderType = ServerLoaderType.Hybrid;
+            else if (lower.Contains("forge") || lower.Contains("neoforge") || lower.Contains("fabric") || lower.Contains("quilt"))
+                _selectedLoaderType = ServerLoaderType.ModOnly;
+            else
+                _selectedLoaderType = ServerLoaderType.PluginOnly;
+        }
     }
 
-    // ---------- 버킷 ----------
-
-    private void HandleJarSelected(InputFileChangeEventArgs e)
+    private async Task HandleUploadSubmitAsync()
     {
-        jarFile = e.File;
-        string lower = jarFile.Name.ToLower();
-
-        // 파일명으로 Java 버전 추측
-        if (lower.Contains("1.8") || lower.Contains("1.12") || lower.Contains("1.16"))
-            selectedJavaVer = 8;
-        else if (lower.Contains("1.17") || lower.Contains("1.18") || lower.Contains("1.19") || lower.Contains("1.20.1") || lower.Contains("1.20.4"))
-            selectedJavaVer = 17;
-        else if (lower.Contains("1.20") || lower.Contains("1.21"))
-            selectedJavaVer = 21;
-        else
-            selectedJavaVer = 25;
-
-        // 파일명으로 로더 종류 추측
-        if (lower.Contains("mohist") || lower.Contains("arclight") || lower.Contains("magma"))
-            selectedLoaderType = ServerLoaderType.Hybrid;
-        else if (lower.Contains("forge") || lower.Contains("fabric") || lower.Contains("quilt"))
-            selectedLoaderType = ServerLoaderType.ModOnly;
-        else
-            selectedLoaderType = ServerLoaderType.PluginOnly;
-    }
-
-    private async Task UploadJarAsync()
-    {
-        if (jarFile == null) return;
-        isUploading = true;
-        SetStatus("버킷 업로드 중...");
+        if (_selectedFile == null || AuthState.CurrentUser == null) return;
+        _isUploading = true;
+        _resultCode = null;
 
         try
         {
-            string fileName = Path.GetFileName(jarFile.Name);
-            await SaveToDiskAsync(jarFile, Path.Combine(InstanceManager.JarsPath, fileName));
+            await using var stream = _selectedFile.OpenReadStream(MaxUploadSize);
+            var (success, code) = _activeTab == "jars"
+                ? await AddonService.UploadServerTemplateAsync(_selectedFile.Name, stream, _selectedJavaVersion, _selectedLoaderType, AuthState.CurrentUser.Username)
+                : await AddonService.UploadAddonFileAsync(_selectedFile.Name, stream, GetCurrentAddonType(), AuthState.CurrentUser.Username);
 
-            var existing = await Db.ServerTemplates.FirstOrDefaultAsync(t => t.FileName == fileName);
-            if (existing == null)
+            _isError = !success;
+            _resultCode = code;
+            if (success)
             {
-                existing = new ServerTemplate { FileName = fileName };
-                Db.ServerTemplates.Add(existing);
+                _selectedFile = null;
+                _inputFileKey++;
             }
-            existing.RecommendedJavaVersion = selectedJavaVer;
-            existing.LoaderType = selectedLoaderType;
-            existing.FileSizeBytes = jarFile.Size;
-            existing.UploadedAt = DateTime.UtcNow;
-
-            AddAudit("버킷 업로드", $"{fileName} (Java {selectedJavaVer}, {LoaderLabel(selectedLoaderType)})");
-            await Db.SaveChangesAsync();
-
-            SetStatus($"버킷 '{fileName}' 업로드 완료.");
-            jarFile = null;
-            await LoadAllAsync();
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"업로드 실패: {ex.Message}", true);
+            await LoadStorageAsync();
         }
         finally
         {
-            isUploading = false;
+            _isUploading = false;
         }
     }
 
-    private async Task DeleteJarAsync(ServerTemplate t)
+    private async Task HandleDeleteTemplateAsync(int id)
     {
-        string path = Path.Combine(InstanceManager.JarsPath, t.FileName);
-        if (File.Exists(path)) File.Delete(path);
-
-        Db.ServerTemplates.Remove(t);
-        AddAudit("버킷 삭제", t.FileName);
-        await Db.SaveChangesAsync();
-
-        SetStatus($"'{t.FileName}' 삭제됨.");
-        await LoadAllAsync();
+        if (AuthState.CurrentUser == null) return;
+        var (success, code) = await AddonService.DeleteServerTemplateAsync(id, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+        await LoadStorageAsync();
     }
 
-    // ---------- 월드 맵 ----------
-
-    private void HandleMapSelected(InputFileChangeEventArgs e)
+    private async Task HandleDeleteAddonAsync(int id)
     {
-        mapFile = e.File;
-        if (string.IsNullOrWhiteSpace(customMapName))
-            customMapName = Path.GetFileNameWithoutExtension(mapFile.Name);
-    }
-
-    private async Task UploadMapAsync()
-    {
-        if (mapFile == null) return;
-        isUploading = true;
-        SetStatus("월드 맵 업로드 중...");
-
-        try
-        {
-            string rawName = string.IsNullOrWhiteSpace(customMapName) ? mapFile.Name : customMapName.Trim();
-            if (!rawName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) rawName += ".zip";
-            string fileName = Path.GetFileName(rawName);
-
-            await SaveToDiskAsync(mapFile, Path.Combine(InstanceManager.MapsPath, fileName));
-
-            var existing = await Db.WorldMaps.FirstOrDefaultAsync(m => m.FileName == fileName);
-            if (existing == null)
-            {
-                existing = new WorldMap { FileName = fileName };
-                Db.WorldMaps.Add(existing);
-            }
-            existing.FileSizeBytes = mapFile.Size;
-            existing.UploadedAt = DateTime.UtcNow;
-
-            AddAudit("월드 맵 업로드", fileName);
-            await Db.SaveChangesAsync();
-
-            SetStatus($"월드 맵 '{fileName}' 업로드 완료.");
-            mapFile = null;
-            customMapName = string.Empty;
-            await LoadAllAsync();
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"업로드 실패: {ex.Message}", true);
-        }
-        finally
-        {
-            isUploading = false;
-        }
-    }
-
-    private void StartRename(WorldMap map)
-    {
-        renamingMapId = map.Id;
-        newMapFileName = Path.GetFileNameWithoutExtension(map.FileName);
-    }
-
-    // REQ-09: 이름 변경 시 실제 디스크 파일명도 함께 변경 (File.Move)
-    private async Task RenameMapFileAsync(WorldMap map)
-    {
-        if (string.IsNullOrWhiteSpace(newMapFileName)) return;
-
-        string targetName = newMapFileName.Trim();
-        if (!targetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) targetName += ".zip";
-        targetName = Path.GetFileName(targetName);
-
-        string oldPath = Path.Combine(InstanceManager.MapsPath, map.FileName);
-        string newPath = Path.Combine(InstanceManager.MapsPath, targetName);
-
-        if (oldPath == newPath)
-        {
-            renamingMapId = null;
-            return;
-        }
-        if (File.Exists(newPath))
-        {
-            SetStatus($"이미 '{targetName}' 파일이 존재합니다.", true);
-            return;
-        }
-
-        try
-        {
-            if (File.Exists(oldPath)) File.Move(oldPath, newPath);
-
-            string oldName = map.FileName;
-            map.FileName = targetName;
-            AddAudit("월드 맵 이름 변경", $"{oldName} -> {targetName}");
-            await Db.SaveChangesAsync();
-
-            SetStatus($"'{targetName}'(으)로 이름 변경 완료.");
-            renamingMapId = null;
-            await LoadAllAsync();
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"이름 변경 실패: {ex.Message}", true);
-        }
-    }
-
-    private async Task DeleteMapAsync(WorldMap m)
-    {
-        string path = Path.Combine(InstanceManager.MapsPath, m.FileName);
-        if (File.Exists(path)) File.Delete(path);
-
-        Db.WorldMaps.Remove(m);
-        AddAudit("월드 맵 삭제", m.FileName);
-        await Db.SaveChangesAsync();
-
-        SetStatus($"'{m.FileName}' 삭제됨.");
-        await LoadAllAsync();
-    }
-
-    // ---------- 플러그인 / 모드 ----------
-
-    private string AddonFolder(AddonType type)
-        => type == AddonType.Plugin ? InstanceManager.PluginsPath : InstanceManager.ModsPath;
-
-    private string AddonLabel(AddonType type)
-        => type == AddonType.Plugin ? "플러그인" : "모드";
-
-    private IBrowserFile? GetPendingAddon(AddonType type)
-        => type == AddonType.Plugin ? pendingPlugin : pendingMod;
-
-    private void HandleAddonSelected(InputFileChangeEventArgs e, AddonType type)
-    {
-        if (type == AddonType.Plugin) pendingPlugin = e.File;
-        else pendingMod = e.File;
-    }
-
-    private async Task UploadAddonAsync(AddonType type)
-    {
-        var file = GetPendingAddon(type);
-        if (file == null) return;
-
-        isUploading = true;
-        SetStatus($"{AddonLabel(type)} 업로드 중...");
-
-        try
-        {
-            string fileName = Path.GetFileName(file.Name);
-            await SaveToDiskAsync(file, Path.Combine(AddonFolder(type), fileName));
-
-            var existing = await Db.AddonFiles.FirstOrDefaultAsync(a => a.FileName == fileName && a.Type == type);
-            if (existing == null)
-            {
-                existing = new AddonFile { FileName = fileName, Type = type };
-                Db.AddonFiles.Add(existing);
-            }
-            existing.FileSizeBytes = file.Size;
-            existing.UploadedAt = DateTime.UtcNow;
-
-            AddAudit($"{AddonLabel(type)} 업로드", fileName);
-            await Db.SaveChangesAsync();
-
-            SetStatus($"{AddonLabel(type)} '{fileName}' 업로드 완료.");
-            if (type == AddonType.Plugin) pendingPlugin = null;
-            else pendingMod = null;
-            await LoadAllAsync();
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"업로드 실패: {ex.Message}", true);
-        }
-        finally
-        {
-            isUploading = false;
-        }
-    }
-
-    private async Task DeleteAddonAsync(AddonFile a)
-    {
-        string path = Path.Combine(AddonFolder(a.Type), a.FileName);
-        if (File.Exists(path)) File.Delete(path);
-
-        Db.AddonFiles.Remove(a);
-        AddAudit($"{AddonLabel(a.Type)} 삭제", a.FileName);
-        await Db.SaveChangesAsync();
-
-        SetStatus($"'{a.FileName}' 삭제됨. (이미 슬롯에 장착된 복사본은 유지됩니다)");
-        await LoadAllAsync();
+        if (AuthState.CurrentUser == null) return;
+        var (success, code) = await AddonService.DeleteAddonFileAsync(id, AuthState.CurrentUser.Username);
+        _isError = !success;
+        _resultCode = code;
+        await LoadStorageAsync();
     }
 }

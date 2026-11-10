@@ -1,8 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using MCWS.Models;
+using MCWS_v2.Models;
 
-namespace MCWS.Services;
+namespace MCWS_v2.Services;
 
 // 콘솔 화면에 한 줄씩 찍힐 로그 데이터 묶음
 public class ConsoleLogLine
@@ -15,12 +15,14 @@ public class ConsoleLogLine
 public class ServerProcess
 {
     private Process? _process;
-    // REQ-11: 최근 300줄만 메모리에 유지하는 링 버퍼(큐)
+    // 최근 300줄만 메모리에 유지하는 링 버퍼(큐)
     private readonly ConcurrentQueue<ConsoleLogLine> _logBuffer = new();
     private const int MaxLogLines = 300;
 
     public int InstanceId { get; }
     public ServerStatus Status { get; private set; } = ServerStatus.Offline;
+    public int AllocatedRamGb { get; private set; }
+    public Process? RawProcess => _process;
 
     // 새 로그가 찍히거나 상태가 바뀔 때 웹 화면에 즉시 알려주는 이벤트
     public event Action<int, ConsoleLogLine>? OnLog;
@@ -42,6 +44,7 @@ public class ServerProcess
 
         try
         {
+            AllocatedRamGb = ramGb;
             UpdateStatus(ServerStatus.Starting);
 
             var startInfo = new ProcessStartInfo
@@ -64,7 +67,7 @@ public class ServerProcess
                 if (e.Data == null) return;
                 AddLog(e.Data, isError: false);
 
-                // 마인크래프트 부팅 완료 문구 감지 시 Starting -> Running 전환!
+                // 마인크래프트 부팅 완료 문구 감지 시 Starting -> Running 전환
                 if (Status == ServerStatus.Starting && e.Data.Contains("Done (") && e.Data.Contains("For help"))
                 {
                     UpdateStatus(ServerStatus.Running);
@@ -102,7 +105,7 @@ public class ServerProcess
         }
     }
 
-    // 2. REQ-12: 명령어 주입 (/op, say, list 등)
+    // 2. 명령어 주입 (/op, say, list 등)
     public async Task<bool> SendCommandAsync(string command)
     {
         if (!IsAlive || _process == null) return false;
@@ -121,7 +124,7 @@ public class ServerProcess
         }
     }
 
-    // 3. REQ-02: 안전한 종료 (Graceful Shutdown - stop 주입 후 대기)
+    // 3. 안전한 종료 (Graceful Shutdown - stop 주입 후 최대 120초 대기)
     public async Task StopGracefullyAsync(int timeoutSeconds = 120)
     {
         if (!IsAlive || _process == null)
@@ -138,12 +141,10 @@ public class ServerProcess
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
         try
         {
-            // 마인크래프트가 월드를 저장하고 스스로 꺼질 때까지 최대 120초 대기
             await _process.WaitForExitAsync(cts.Token);
         }
         catch (OperationCanceledException)
         {
-            // 20초가 지나도 안 꺼지고 먹통이면 강제 종료
             AddLog($"[MCWS 경고] {timeoutSeconds}초 동안 응답이 없어 강제 종료(Kill)합니다.", isError: true);
             _process.Kill(entireProcessTree: true);
         }
@@ -156,7 +157,6 @@ public class ServerProcess
         var line = new ConsoleLogLine { Text = text, IsError = isError };
         _logBuffer.Enqueue(line);
 
-        // 300줄 넘어가면 가장 오래된 첫 줄 버리기 (메모리 폭발 방지)
         while (_logBuffer.Count > MaxLogLines)
             _logBuffer.TryDequeue(out _);
 

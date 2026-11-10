@@ -1,4 +1,4 @@
-namespace MCWS.Models;
+namespace MCWS_v2.Models;
 
 public class AuditLog
 {

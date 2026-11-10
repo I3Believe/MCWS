@@ -1,9 +1,9 @@
 using Microsoft.AspNetCore.Components.Server.ProtectedBrowserStorage;
 using Microsoft.EntityFrameworkCore;
-using MCWS.Data;
-using MCWS.Models;
+using MCWS_v2.Data;
+using MCWS_v2.Models;
 
-namespace MCWS.Services;
+namespace MCWS_v2.Services;
 
 public class AuthStateService
 {
